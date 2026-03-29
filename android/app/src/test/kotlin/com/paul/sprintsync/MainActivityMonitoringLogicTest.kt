@@ -5,6 +5,7 @@ import com.paul.sprintsync.features.race_session.SessionDeviceRole
 import com.paul.sprintsync.features.race_session.SessionNetworkRole
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -330,6 +331,25 @@ class MainActivityMonitoringLogicTest {
     }
 
     @Test
+    fun `display rows include per-endpoint limit labels`() {
+        val rows = buildDisplayLapRowsForConnectedDevices(
+            connectedEndpointIds = linkedSetOf("ep-1", "ep-2"),
+            deviceNamesByEndpointId = mapOf("ep-1" to "Pixel 7", "ep-2" to "CPH2399"),
+            elapsedByEndpointId = emptyMap(),
+            limitMsByEndpointId = mapOf("ep-1" to 5_200L),
+            hostStartSensorNanos = null,
+            hostStopSensorNanos = null,
+            monitoringActive = false,
+            nowSensorNanos = 0L,
+        )
+
+        assertEquals("5.20", rows[0].limitLabel)
+        assertEquals(5_200L, rows[0].limitMs)
+        assertNull(rows[1].limitLabel)
+        assertNull(rows[1].limitMs)
+    }
+
+    @Test
     fun `display rows keep running after host stop until endpoint final arrives`() {
         val rows = buildDisplayLapRowsForConnectedDevices(
             connectedEndpointIds = linkedSetOf("ep-1"),
@@ -343,6 +363,108 @@ class MainActivityMonitoringLogicTest {
 
         assertEquals(1, rows.size)
         assertEquals(formatElapsedTimerDisplay(2_000L), rows[0].lapTimeLabel)
+    }
+
+    @Test
+    fun `display limit marks PASS when elapsed is equal or below limit`() {
+        assertEquals(
+            DisplayRowFlashStatus.PASS,
+            displayFlashStatusForElapsed(
+                limitMs = 6_500L,
+                elapsedNanos = 6_500_000_000L,
+            ),
+        )
+        assertEquals(
+            DisplayRowFlashStatus.PASS,
+            displayFlashStatusForElapsed(
+                limitMs = 6_500L,
+                elapsedNanos = 6_400_000_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `display limit marks FAIL when elapsed is above limit`() {
+        assertEquals(
+            DisplayRowFlashStatus.FAIL,
+            displayFlashStatusForElapsed(
+                limitMs = 6_500L,
+                elapsedNanos = 6_501_000_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `display limit disabled returns NONE flash status`() {
+        assertEquals(
+            DisplayRowFlashStatus.NONE,
+            displayFlashStatusForElapsed(
+                limitMs = null,
+                elapsedNanos = 6_400_000_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `display limit flash status evaluates per-endpoint limits independently`() {
+        assertEquals(
+            DisplayRowFlashStatus.PASS,
+            displayFlashStatusForElapsed(
+                limitMs = 6_500L,
+                elapsedNanos = 6_000_000_000L,
+            ),
+        )
+        assertEquals(
+            DisplayRowFlashStatus.FAIL,
+            displayFlashStatusForElapsed(
+                limitMs = 5_000L,
+                elapsedNanos = 6_000_000_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `display flash windows are pruned when expired or disconnected`() {
+        val pruned = pruneDisplayFlashWindowsByEndpointId(
+            connectedEndpointIds = linkedSetOf("ep-1"),
+            flashWindowsByEndpointId = mapOf(
+                "ep-1" to DisplayFlashWindow(
+                    status = DisplayRowFlashStatus.PASS,
+                    expiresAtElapsedNanos = 1_200L,
+                ),
+                "ep-2" to DisplayFlashWindow(
+                    status = DisplayRowFlashStatus.FAIL,
+                    expiresAtElapsedNanos = 5_000L,
+                ),
+            ),
+            nowElapsedNanos = 1_000L,
+        )
+
+        assertEquals(1, pruned.size)
+        assertEquals(DisplayRowFlashStatus.PASS, pruned["ep-1"]?.status)
+        assertNull(pruned["ep-2"])
+    }
+
+    @Test
+    fun `active display flash status map excludes expired rows`() {
+        val active = activeDisplayFlashStatusesByEndpointId(
+            connectedEndpointIds = linkedSetOf("ep-1", "ep-2"),
+            flashWindowsByEndpointId = mapOf(
+                "ep-1" to DisplayFlashWindow(
+                    status = DisplayRowFlashStatus.PASS,
+                    expiresAtElapsedNanos = 2_000L,
+                ),
+                "ep-2" to DisplayFlashWindow(
+                    status = DisplayRowFlashStatus.FAIL,
+                    expiresAtElapsedNanos = 500L,
+                ),
+            ),
+            nowElapsedNanos = 1_000L,
+        )
+
+        assertEquals(1, active.size)
+        assertEquals(DisplayRowFlashStatus.PASS, active["ep-1"])
+        assertNull(active["ep-2"])
     }
 
     @Test

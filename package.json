@@ -4,7 +4,7 @@
   "scripts": {
     "build:debug:apk": "cd android && gradlew.bat :app:assembleDebug",
     "build:release:apk": "cd android && gradlew.bat :app:assembleRelease",
-    "build:flavor:apks": "cd android && gradlew.bat :app:assembleXiaomiPadDisplayDebug :app:assemblePixel7SingleDebug :app:assembleOneplusSingleDebug",
+    "build:flavor:apks": "cd android && gradlew.bat :app:assembleXiaomiPadDisplayDebug :app:assembleTopazSingleDebug :app:assembleEmlL29SingleDebug",
     "install:flavor:devices": "node scripts/install-debug-device-flavors-adb.mjs",
     "rebuild:flavor:devices": "npm run build:flavor:apks && npm run install:flavor:devices",
     "rebuild:debug:devices": "npm run build:debug:apk && node scripts/install-debug-apk.mjs",

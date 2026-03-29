@@ -52,6 +52,8 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
         private const val TIMER_REFRESH_INTERVAL_MS = 100L
         private const val TAG = "SprintSyncRuntime"
         private const val MAX_PENDING_LAPS = 100
+        private const val DISPLAY_LIMIT_FLASH_DURATION_MS = 1_200L
+        private const val DISPLAY_LIMIT_FLASH_DURATION_NANOS = DISPLAY_LIMIT_FLASH_DURATION_MS * 1_000_000L
         private const val GPS_LOCK_VALIDITY_NANOS = 10_000_000_000L
         private const val GPS_REACQUIRE_REQUEST_THROTTLE_NANOS = 5_000_000_000L
     }
@@ -74,6 +76,9 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
     private val displayHostDeviceNamesByEndpointId = linkedMapOf<String, String>()
     private val displayLatestLapByEndpointId = linkedMapOf<String, Long>()
     private val displayStartedAtElapsedNanosByEndpointId = linkedMapOf<String, Long>()
+    private val displayStartedAtSensorNanosByEndpointId = linkedMapOf<String, Long>()
+    private val displayFlashByEndpointId = linkedMapOf<String, DisplayFlashWindow>()
+    private val displayLimitMsByEndpointId = linkedMapOf<String, Long>()
     private var lastRelayedStartSensorNanos: Long? = null
     private var lastRelayedStopSensorNanos: Long? = null
     private var displayReconnectionPending: Boolean = false
@@ -272,6 +277,16 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                         displayDiscoveredHosts.clear()
                         updateUiState { copy(networkSummary = "Stopped") }
                         appendEvent("hosting stopped")
+                        syncControllerSummaries()
+                    },
+                    onSetDisplayLimitMs = { endpointId, value ->
+                        val normalized = value?.takeIf { it > 0L }
+                        if (normalized == null) {
+                            displayLimitMsByEndpointId.remove(endpointId)
+                            displayFlashByEndpointId.remove(endpointId)
+                        } else {
+                            displayLimitMsByEndpointId[endpointId] = normalized
+                        }
                         syncControllerSummaries()
                     },
                 )
@@ -554,6 +569,8 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                         displayHostDeviceNamesByEndpointId.remove(event.endpointId)
                         displayLatestLapByEndpointId.remove(event.endpointId)
                         displayStartedAtElapsedNanosByEndpointId.remove(event.endpointId)
+                        displayStartedAtSensorNanosByEndpointId.remove(event.endpointId)
+                        displayLimitMsByEndpointId.remove(event.endpointId)
                     }
                     is NearbyEvent.ConnectionResult -> {
                         if (event.connected) {
@@ -565,27 +582,51 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                             displayHostDeviceNamesByEndpointId.remove(event.endpointId)
                             displayLatestLapByEndpointId.remove(event.endpointId)
                             displayStartedAtElapsedNanosByEndpointId.remove(event.endpointId)
+                            displayStartedAtSensorNanosByEndpointId.remove(event.endpointId)
+                            displayLimitMsByEndpointId.remove(event.endpointId)
+                            displayFlashByEndpointId.remove(event.endpointId)
                         }
                     }
                     is NearbyEvent.EndpointDisconnected -> {
                         displayHostDeviceNamesByEndpointId.remove(event.endpointId)
                         displayLatestLapByEndpointId.remove(event.endpointId)
                         displayStartedAtElapsedNanosByEndpointId.remove(event.endpointId)
+                        displayStartedAtSensorNanosByEndpointId.remove(event.endpointId)
+                        displayLimitMsByEndpointId.remove(event.endpointId)
+                        displayFlashByEndpointId.remove(event.endpointId)
                     }
                     is NearbyEvent.PayloadReceived -> {
                         SessionTriggerMessage.tryParse(event.message)?.let { trigger ->
                             when (trigger.triggerType.lowercase()) {
                                 "start" -> {
                                     displayStartedAtElapsedNanosByEndpointId[event.endpointId] = SystemClock.elapsedRealtimeNanos()
+                                    displayStartedAtSensorNanosByEndpointId[event.endpointId] = trigger.triggerSensorNanos
                                     displayLatestLapByEndpointId.remove(event.endpointId)
+                                    displayFlashByEndpointId.remove(event.endpointId)
                                 }
                                 "stop" -> {
+                                    val startedAtSensor = displayStartedAtSensorNanosByEndpointId[event.endpointId]
                                     val startedAt = displayStartedAtElapsedNanosByEndpointId[event.endpointId]
                                     if (startedAt != null && displayLatestLapByEndpointId[event.endpointId] == null) {
                                         val nowElapsed = SystemClock.elapsedRealtimeNanos()
-                                        displayLatestLapByEndpointId[event.endpointId] =
+                                        val elapsedNanos = if (startedAtSensor != null && trigger.triggerSensorNanos > 0L) {
+                                            (trigger.triggerSensorNanos - startedAtSensor).coerceAtLeast(0L)
+                                        } else {
                                             (nowElapsed - startedAt).coerceAtLeast(0L)
+                                        }
+                                        displayLatestLapByEndpointId[event.endpointId] = elapsedNanos
+                                        val flashStatus = displayFlashStatusForElapsed(
+                                            limitMs = displayLimitMsByEndpointId[event.endpointId],
+                                            elapsedNanos = elapsedNanos,
+                                        )
+                                        if (flashStatus != DisplayRowFlashStatus.NONE) {
+                                            displayFlashByEndpointId[event.endpointId] = DisplayFlashWindow(
+                                                status = flashStatus,
+                                                expiresAtElapsedNanos = nowElapsed + DISPLAY_LIMIT_FLASH_DURATION_NANOS,
+                                            )
+                                        }
                                         displayStartedAtElapsedNanosByEndpointId.remove(event.endpointId)
+                                        displayStartedAtSensorNanosByEndpointId.remove(event.endpointId)
                                     }
                                 }
                             }
@@ -832,7 +873,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
             ) {
                 val startTrigger = SessionTriggerMessage(
                     triggerType = "start",
-                    triggerSensorNanos = 0L,
+                    triggerSensorNanos = activeStartNanos,
                 )
                 if (hostEndpoint != null) {
                     connectionsManager.sendMessage(hostEndpoint, startTrigger.toJsonString()) { result ->
@@ -852,7 +893,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
             if (stopNanos != null && stopNanos != lastRelayedStopSensorNanos) {
                 val stopTrigger = SessionTriggerMessage(
                     triggerType = "stop",
-                    triggerSensorNanos = 0L,
+                    triggerSensorNanos = stopNanos,
                 )
 
                 if (hostEndpoint != null) {
@@ -951,15 +992,27 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
 
             else -> "Unlocked"
         }
+        val nowElapsedNanos = SystemClock.elapsedRealtimeNanos()
+        val connectedEndpointIds = connectionsManager.connectedEndpoints()
+        val prunedDisplayFlashes = pruneDisplayFlashWindowsByEndpointId(
+            connectedEndpointIds = connectedEndpointIds,
+            flashWindowsByEndpointId = displayFlashByEndpointId,
+            nowElapsedNanos = nowElapsedNanos,
+        )
+        val activeDisplayFlashes = prunedDisplayFlashes.mapValues { (_, flashWindow) -> flashWindow.status }
+        displayFlashByEndpointId.clear()
+        displayFlashByEndpointId.putAll(prunedDisplayFlashes)
         val displayLapRows = buildDisplayLapRowsForConnectedDevices(
-            connectedEndpointIds = connectionsManager.connectedEndpoints(),
+            connectedEndpointIds = connectedEndpointIds,
             deviceNamesByEndpointId = displayHostDeviceNamesByEndpointId,
             elapsedByEndpointId = buildDisplayElapsedByEndpointId(
-                connectedEndpointIds = connectionsManager.connectedEndpoints(),
+                connectedEndpointIds = connectedEndpointIds,
                 finalizedElapsedByEndpointId = displayLatestLapByEndpointId,
                 startedAtElapsedNanosByEndpointId = displayStartedAtElapsedNanosByEndpointId,
-                nowElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+                nowElapsedNanos = nowElapsedNanos,
             ),
+            limitMsByEndpointId = displayLimitMsByEndpointId,
+            flashStatusByEndpointId = activeDisplayFlashes,
             hostStartSensorNanos = timelineForUi.hostStartSensorNanos,
             hostStopSensorNanos = timelineForUi.hostStopSensorNanos,
             monitoringActive = raceState.monitoringActive,
@@ -1161,7 +1214,8 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                     }
                     val shouldRefreshForDisplayRows = isDisplayRole &&
                         ((raceState.timeline.hostStartSensorNanos != null && hasPendingDisplayFinals) ||
-                            hasRunningDisplayTimers)
+                            hasRunningDisplayTimers ||
+                            displayFlashByEndpointId.isNotEmpty())
                     if (!isAppResumed || (!raceState.monitoringActive && !shouldRefreshForDisplayRows)) {
                         break
                     }
@@ -1227,6 +1281,9 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
         displayHostDeviceNamesByEndpointId.clear()
         displayLatestLapByEndpointId.clear()
         displayStartedAtElapsedNanosByEndpointId.clear()
+        displayStartedAtSensorNanosByEndpointId.clear()
+        displayLimitMsByEndpointId.clear()
+        displayFlashByEndpointId.clear()
     }
 
     private fun logRuntimeDiagnostic(message: String) {
@@ -1347,6 +1404,8 @@ internal fun buildDisplayLapRowsForConnectedDevices(
     connectedEndpointIds: Set<String>,
     deviceNamesByEndpointId: Map<String, String>,
     elapsedByEndpointId: Map<String, Long>,
+    limitMsByEndpointId: Map<String, Long> = emptyMap(),
+    flashStatusByEndpointId: Map<String, DisplayRowFlashStatus> = emptyMap(),
     hostStartSensorNanos: Long?,
     hostStopSensorNanos: Long?,
     monitoringActive: Boolean,
@@ -1361,15 +1420,72 @@ internal fun buildDisplayLapRowsForConnectedDevices(
     }
     return connectedEndpointIds.map { endpointId ->
         val deviceName = deviceNamesByEndpointId[endpointId]?.takeIf { it.isNotBlank() } ?: endpointId
+        val limitMs = limitMsByEndpointId[endpointId]
         val lapTimeLabel = (elapsedByEndpointId[endpointId] ?: liveElapsedNanos)?.let { elapsedNanos ->
             val totalMillis = (elapsedNanos / 1_000_000L).coerceAtLeast(0L)
             formatElapsedTimerDisplay(totalMillis)
         } ?: "READY"
         DisplayLapRow(
+            endpointId = endpointId,
             deviceName = deviceName,
+            limitMs = limitMs,
+            limitLabel = limitMs?.let(::formatDisplayLimitLabel),
             lapTimeLabel = lapTimeLabel,
+            flashStatus = flashStatusByEndpointId[endpointId] ?: DisplayRowFlashStatus.NONE,
         )
     }
+}
+
+internal data class DisplayFlashWindow(
+    val status: DisplayRowFlashStatus,
+    val expiresAtElapsedNanos: Long,
+)
+
+internal fun displayFlashStatusForElapsed(limitMs: Long?, elapsedNanos: Long): DisplayRowFlashStatus {
+    val limit = limitMs ?: return DisplayRowFlashStatus.NONE
+    val elapsedMs = (elapsedNanos / 1_000_000L).coerceAtLeast(0L)
+    return if (elapsedMs <= limit) {
+        DisplayRowFlashStatus.PASS
+    } else {
+        DisplayRowFlashStatus.FAIL
+    }
+}
+
+internal fun formatDisplayLimitLabel(limitMs: Long): String {
+    val clamped = limitMs.coerceAtLeast(0L)
+    val totalSeconds = clamped / 1_000L
+    val centiseconds = (clamped % 1_000L) / 10L
+    return if (totalSeconds < 60L) {
+        String.format("%d.%02d", totalSeconds, centiseconds)
+    } else {
+        val minutes = totalSeconds / 60L
+        val seconds = totalSeconds % 60L
+        String.format("%d:%02d.%02d", minutes, seconds, centiseconds)
+    }
+}
+
+internal fun pruneDisplayFlashWindowsByEndpointId(
+    connectedEndpointIds: Set<String>,
+    flashWindowsByEndpointId: Map<String, DisplayFlashWindow>,
+    nowElapsedNanos: Long,
+): Map<String, DisplayFlashWindow> {
+    return flashWindowsByEndpointId
+        .filter { (endpointId, flashWindow) ->
+            connectedEndpointIds.contains(endpointId) &&
+                flashWindow.expiresAtElapsedNanos > nowElapsedNanos
+        }
+}
+
+internal fun activeDisplayFlashStatusesByEndpointId(
+    connectedEndpointIds: Set<String>,
+    flashWindowsByEndpointId: Map<String, DisplayFlashWindow>,
+    nowElapsedNanos: Long,
+): Map<String, DisplayRowFlashStatus> {
+    return pruneDisplayFlashWindowsByEndpointId(
+        connectedEndpointIds = connectedEndpointIds,
+        flashWindowsByEndpointId = flashWindowsByEndpointId,
+        nowElapsedNanos = nowElapsedNanos,
+    ).mapValues { (_, flashWindow) -> flashWindow.status }
 }
 
 internal fun buildDisplayElapsedByEndpointId(

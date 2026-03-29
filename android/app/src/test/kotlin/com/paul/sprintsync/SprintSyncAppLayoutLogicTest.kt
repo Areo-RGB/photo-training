@@ -7,6 +7,7 @@ import com.paul.sprintsync.features.race_session.SessionDeviceRole
 import com.paul.sprintsync.features.race_session.SessionOperatingMode
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class SprintSyncAppLayoutLogicTest {
@@ -143,6 +144,18 @@ class SprintSyncAppLayoutLogicTest {
     }
 
     @Test
+    fun `per-row limit button only shows in display host mode`() {
+        assertTrue(shouldShowPerRowLimitButton(isDisplayHostMode = true))
+        assertFalse(shouldShowPerRowLimitButton(isDisplayHostMode = false))
+    }
+
+    @Test
+    fun `display limit label formatter uses seconds centiseconds`() {
+        assertEquals("5.20", formatDisplayLimitLabel(5_200L))
+        assertEquals("0.00", formatDisplayLimitLabel(0L))
+    }
+
+    @Test
     fun `device role options include split and display roles`() {
         val options = deviceRoleOptions()
         assertTrue(options.contains(SessionDeviceRole.SPLIT))
@@ -235,5 +248,19 @@ class SprintSyncAppLayoutLogicTest {
         val density = Density(1f)
         val clamped = clampDisplayLabelFont(base = 26.sp, rowHeight = 40.dp, density = density)
         assertTrue(clamped.value >= 12f)
+    }
+
+    @Test
+    fun `display row colors map correctly for flash statuses`() {
+        val none = displayColorsForFlashStatus(DisplayRowFlashStatus.NONE)
+        val pass = displayColorsForFlashStatus(DisplayRowFlashStatus.PASS)
+        val fail = displayColorsForFlashStatus(DisplayRowFlashStatus.FAIL)
+
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFFFCC00), none.background)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF000000), none.timeValue)
+        assertEquals(androidx.compose.ui.graphics.Color.White, pass.timeValue)
+        assertEquals(androidx.compose.ui.graphics.Color.White, pass.deviceLabel)
+        assertEquals(androidx.compose.ui.graphics.Color.White, fail.timeValue)
+        assertEquals(androidx.compose.ui.graphics.Color.White, fail.deviceLabel)
     }
 }

@@ -23,8 +23,8 @@ function fail(message, detail = '') {
 
 const flavorTargets = [
   {
-    id: 'pixel7Single',
-    modelMatchers: ['Pixel_7'],
+    id: 'topazSingle',
+    modelMatchers: ['23021RAA2Y', 'topaz'],
     apkCandidates: [
       resolve(
         process.cwd(),
@@ -33,16 +33,16 @@ const flavorTargets = [
         'build',
         'outputs',
         'apk',
-        'pixel7Single',
+        'topazSingle',
         'debug',
-        'app-pixel7Single-debug.apk',
+        'app-topazSingle-debug.apk',
       ),
     ],
-    appId: 'sync.sprint.pixel7.single',
+    appId: 'sync.sprint.topaz.single',
   },
   {
-    id: 'oneplusSingle',
-    modelMatchers: ['CPH2399'],
+    id: 'emlL29Single',
+    modelMatchers: ['EML_L29', 'EML-L29'],
     apkCandidates: [
       resolve(
         process.cwd(),
@@ -51,12 +51,12 @@ const flavorTargets = [
         'build',
         'outputs',
         'apk',
-        'oneplusSingle',
+        'emlL29Single',
         'debug',
-        'app-oneplusSingle-debug.apk',
+        'app-emlL29Single-debug.apk',
       ),
     ],
-    appId: 'sync.sprint.oneplus.single',
+    appId: 'sync.sprint.emll29.single',
   },
   {
     id: 'xiaomiPadDisplay',

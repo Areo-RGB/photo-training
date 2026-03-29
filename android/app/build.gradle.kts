@@ -62,6 +62,24 @@ android {
             buildConfigField("String", "FALLBACK_HOST_IP", "\"192.168.43.1\"")
             resValue("string", "app_name", "Sprint Sync OnePlus")
         }
+        create("topazSingle") {
+            dimension = "deviceProfile"
+            applicationIdSuffix = ".topaz.single"
+            versionNameSuffix = "-topaz-single"
+            buildConfigField("String", "AUTO_START_ROLE", "\"single\"")
+            buildConfigField("int", "TCP_HOST_PORT", "9000")
+            buildConfigField("String", "FALLBACK_HOST_IP", "\"192.168.43.1\"")
+            resValue("string", "app_name", "Sprint Sync Topaz")
+        }
+        create("emlL29Single") {
+            dimension = "deviceProfile"
+            applicationIdSuffix = ".emll29.single"
+            versionNameSuffix = "-emll29-single"
+            buildConfigField("String", "AUTO_START_ROLE", "\"single\"")
+            buildConfigField("int", "TCP_HOST_PORT", "9000")
+            buildConfigField("String", "FALLBACK_HOST_IP", "\"192.168.43.1\"")
+            resValue("string", "app_name", "Sprint Sync EML-L29")
+        }
     }
 
     buildFeatures {
