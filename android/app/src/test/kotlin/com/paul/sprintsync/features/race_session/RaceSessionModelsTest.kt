@@ -186,6 +186,7 @@ class RaceSessionModelsTest {
             targetEndpointId = "ep-2",
             senderDeviceName = "OnePlus Controller",
             limitMillis = null,
+            sensitivityPercent = null,
         )
 
         val parsed = SessionControlCommandMessage.tryParse(original.toJsonString())
@@ -195,6 +196,7 @@ class RaceSessionModelsTest {
         assertEquals("ep-2", parsed?.targetEndpointId)
         assertEquals("OnePlus Controller", parsed?.senderDeviceName)
         assertNull(parsed?.limitMillis)
+        assertNull(parsed?.sensitivityPercent)
     }
 
     @Test
@@ -204,6 +206,7 @@ class RaceSessionModelsTest {
             targetEndpointId = "ep-9",
             senderDeviceName = "OnePlus Controller",
             limitMillis = 7_260L,
+            sensitivityPercent = null,
         )
 
         val parsed = SessionControlCommandMessage.tryParse(original.toJsonString())
@@ -213,15 +216,37 @@ class RaceSessionModelsTest {
         assertEquals("ep-9", parsed?.targetEndpointId)
         assertEquals("OnePlus Controller", parsed?.senderDeviceName)
         assertEquals(7_260L, parsed?.limitMillis)
+        assertNull(parsed?.sensitivityPercent)
+    }
+
+    @Test
+    fun `control command message round-trips motion sensitivity action`() {
+        val original = SessionControlCommandMessage(
+            action = SessionControlAction.SET_MOTION_SENSITIVITY,
+            targetEndpointId = "ep-7",
+            senderDeviceName = "OnePlus Controller",
+            limitMillis = null,
+            sensitivityPercent = 72,
+        )
+
+        val parsed = SessionControlCommandMessage.tryParse(original.toJsonString())
+
+        assertNotNull(parsed)
+        assertEquals(SessionControlAction.SET_MOTION_SENSITIVITY, parsed?.action)
+        assertEquals("ep-7", parsed?.targetEndpointId)
+        assertEquals(72, parsed?.sensitivityPercent)
+        assertNull(parsed?.limitMillis)
     }
 
     @Test
     fun `control command parser rejects invalid payload`() {
         val missingTarget = """{"type":"control_command","action":"reset_timer","targetEndpointId":"","senderDeviceName":"OnePlus"}"""
         val invalidLimit = """{"type":"control_command","action":"set_display_limit","targetEndpointId":"ep-1","senderDeviceName":"OnePlus","limitMillis":0}"""
+        val invalidSensitivity = """{"type":"control_command","action":"set_motion_sensitivity","targetEndpointId":"ep-1","senderDeviceName":"OnePlus","sensitivityPercent":101}"""
 
         assertNull(SessionControlCommandMessage.tryParse(missingTarget))
         assertNull(SessionControlCommandMessage.tryParse(invalidLimit))
+        assertNull(SessionControlCommandMessage.tryParse(invalidSensitivity))
     }
 
     @Test

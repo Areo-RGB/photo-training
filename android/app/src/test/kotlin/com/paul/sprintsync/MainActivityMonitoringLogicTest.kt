@@ -431,6 +431,14 @@ class MainActivityMonitoringLogicTest {
     }
 
     @Test
+    fun `sensitivity percent maps to clamped inverted threshold`() {
+        assertEquals(0.08, thresholdFromSensitivityPercent(0), 0.000001)
+        assertEquals(0.001, thresholdFromSensitivityPercent(100), 0.000001)
+        assertEquals(0.001, thresholdFromSensitivityPercent(150), 0.000001)
+        assertEquals(0.08, thresholdFromSensitivityPercent(-10), 0.000001)
+    }
+
+    @Test
     fun `display rows mark over limit when elapsed exceeds per-endpoint limit`() {
         val rows = buildDisplayLapRowsForConnectedDevices(
             connectedEndpointIds = linkedSetOf("ep-1", "ep-2"),

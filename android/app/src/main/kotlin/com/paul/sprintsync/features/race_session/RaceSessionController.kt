@@ -251,6 +251,7 @@ class RaceSessionController(
             id = localDeviceId,
             name = localDeviceName(),
             role = SessionDeviceRole.START,
+            cameraFacing = SessionCameraFacing.FRONT,
             isLocal = true,
         )
         _uiState.value = _uiState.value.copy(

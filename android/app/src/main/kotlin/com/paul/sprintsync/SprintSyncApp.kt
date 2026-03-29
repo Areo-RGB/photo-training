@@ -69,6 +69,7 @@ import com.paul.sprintsync.sensor_native.SensorNativePreviewViewFactory
 import com.paul.sprintsync.ui.components.*
 import com.paul.sprintsync.ui.theme.*
 import com.paul.sprintsync.ui.theme.InterExtraBoldTabularTypography
+import kotlin.math.roundToInt
 
 data class SprintSyncUiState(
     val permissionGranted: Boolean = false,
@@ -145,6 +146,7 @@ fun SprintSyncApp(
     onConnectDisplayHost: (String) -> Unit,
     onResetDeviceTimer: (String) -> Unit,
     onSetDisplayLimit: (String, Long) -> Unit,
+    onSetDeviceSensitivity: (String, Int) -> Unit,
     onSetMonitoringEnabled: (Boolean) -> Unit,
     onStopMonitoring: () -> Unit,
     onResetRun: () -> Unit,
@@ -361,6 +363,7 @@ fun SprintSyncApp(
                                 onConnectDisplayHost = onConnectDisplayHost,
                                 onResetDeviceTimer = onResetDeviceTimer,
                                 onSetDisplayLimit = onSetDisplayLimit,
+                                onSetDeviceSensitivity = onSetDeviceSensitivity,
                                 onResetRun = onResetRun,
                             )
                         }
@@ -740,6 +743,7 @@ private fun MonitoringSummaryCard(
     onConnectDisplayHost: (String) -> Unit,
     onResetDeviceTimer: (String) -> Unit,
     onSetDisplayLimit: (String, Long) -> Unit,
+    onSetDeviceSensitivity: (String, Int) -> Unit,
     onResetRun: () -> Unit,
 ) {
     val latencyLabel = when (syncModeLabel) {
@@ -748,6 +752,7 @@ private fun MonitoringSummaryCard(
         else -> "-"
     }
     val controllerLimitInputs = remember { mutableStateMapOf<String, String>() }
+    val controllerSensitivityInputs = remember { mutableStateMapOf<String, Float>() }
     var globalLimitInput by rememberSaveable { mutableStateOf("") }
     val controllerTargetDevices = remember(
         setupActionProfile,
@@ -909,12 +914,38 @@ private fun MonitoringSummaryCard(
                                 }
                             }
                             Spacer(Modifier.height(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(1.dp)
+                                    .background(Color(0xFFB0A9BB)),
+                            )
+                            Spacer(Modifier.height(8.dp))
                             controllerTargetDevices.forEach { device ->
                                 val limitInput = controllerLimitInputs[device.id].orEmpty()
+                                val sensitivityValue = controllerSensitivityInputs[device.id] ?: 50f
                                 Text(
                                     text = device.name,
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    text = "Sensitivity ${sensitivityValue.roundToInt()}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.Gray,
+                                )
+                                Slider(
+                                    value = sensitivityValue,
+                                    onValueChange = { next ->
+                                        controllerSensitivityInputs[device.id] = next.coerceIn(0f, 100f)
+                                    },
+                                    valueRange = 0f..100f,
+                                    onValueChangeFinished = {
+                                        val committed = (controllerSensitivityInputs[device.id] ?: sensitivityValue)
+                                            .roundToInt()
+                                            .coerceIn(0, 100)
+                                        onSetDeviceSensitivity(device.id, committed)
+                                    },
                                 )
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),

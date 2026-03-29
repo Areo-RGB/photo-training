@@ -204,6 +204,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                             action = SessionControlAction.RESET_TIMER,
                             targetEndpointId = targetEndpointId,
                             limitMillis = null,
+                            sensitivityPercent = null,
                         )
                     },
                     onSetDisplayLimit = { targetEndpointId, limitMillis ->
@@ -211,6 +212,15 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                             action = SessionControlAction.SET_DISPLAY_LIMIT,
                             targetEndpointId = targetEndpointId,
                             limitMillis = limitMillis,
+                            sensitivityPercent = null,
+                        )
+                    },
+                    onSetDeviceSensitivity = { targetEndpointId, sensitivityPercent ->
+                        sendControllerCommandToDisplayHost(
+                            action = SessionControlAction.SET_MOTION_SENSITIVITY,
+                            targetEndpointId = targetEndpointId,
+                            limitMillis = null,
+                            sensitivityPercent = sensitivityPercent,
                         )
                     },
                     onSetMonitoringEnabled = { enabled ->
@@ -641,9 +651,25 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                     }
                     is NearbyEvent.PayloadReceived -> {
                         SessionControlCommandMessage.tryParse(event.message)?.let { command ->
-                            if (command.action == SessionControlAction.RESET_TIMER) {
-                                raceSessionController.resetRun()
-                                appendEvent("remote reset from ${command.senderDeviceName}")
+                            when (command.action) {
+                                SessionControlAction.RESET_TIMER -> {
+                                    raceSessionController.resetRun()
+                                    appendEvent("remote reset from ${command.senderDeviceName}")
+                                }
+                                SessionControlAction.SET_MOTION_SENSITIVITY -> {
+                                    val sensitivityPercent = command.sensitivityPercent
+                                    if (sensitivityPercent != null) {
+                                        val threshold = thresholdFromSensitivityPercent(sensitivityPercent)
+                                        motionDetectionController.updateThreshold(threshold)
+                                        appendEvent(
+                                            "remote sensitivity ${sensitivityPercent}% from ${command.senderDeviceName}",
+                                        )
+                                        syncControllerSummaries()
+                                    } else {
+                                        appendEvent("remote sensitivity ignored: invalid payload")
+                                    }
+                                }
+                                SessionControlAction.SET_DISPLAY_LIMIT -> Unit
                             }
                         }
                         SessionControllerTargetsMessage.tryParse(event.message)?.let { snapshot ->
@@ -730,6 +756,21 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                                         displayLimitMillisByEndpointId[command.targetEndpointId] = limitMillis
                                     } else {
                                         displayLimitMillisByEndpointId.remove(command.targetEndpointId)
+                                    }
+                                }
+                                SessionControlAction.SET_MOTION_SENSITIVITY -> {
+                                    val sensitivityPercent = command.sensitivityPercent
+                                    if (
+                                        sensitivityPercent != null &&
+                                        connectionsManager.connectedEndpoints().contains(command.targetEndpointId)
+                                    ) {
+                                        connectionsManager.sendMessage(command.targetEndpointId, command.toJsonString()) { result ->
+                                            result.exceptionOrNull()?.let { error ->
+                                                appendEvent("sensitivity route error: ${error.localizedMessage ?: "unknown"}")
+                                            }
+                                        }
+                                    } else {
+                                        appendEvent("sensitivity route skipped: target not connected")
                                     }
                                 }
                             }
@@ -1357,6 +1398,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
         action: SessionControlAction,
         targetEndpointId: String,
         limitMillis: Long?,
+        sensitivityPercent: Int?,
     ) {
         val hostEndpoint = displayConnectedHostEndpointId
         if (hostEndpoint.isNullOrBlank()) {
@@ -1368,6 +1410,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
             targetEndpointId = targetEndpointId,
             senderDeviceName = localEndpointName(),
             limitMillis = limitMillis,
+            sensitivityPercent = sensitivityPercent,
         ).toJsonString()
         connectionsManager.sendMessage(hostEndpoint, payload) { result ->
             result.exceptionOrNull()?.let { error ->
@@ -1560,6 +1603,13 @@ internal fun controllerInitialStage(): SessionStage = SessionStage.MONITORING
 
 internal fun isControllerEndpointName(deviceName: String?): Boolean {
     return deviceName?.contains("controller", ignoreCase = true) == true
+}
+
+internal fun thresholdFromSensitivityPercent(sensitivityPercent: Int): Double {
+    val clampedPercent = sensitivityPercent.coerceIn(0, 100)
+    val fraction = clampedPercent / 100.0
+    val threshold = 0.08 - (0.079 * fraction)
+    return threshold.coerceIn(0.001, 0.08)
 }
 
 internal fun buildDisplayLapRowsForConnectedDevices(

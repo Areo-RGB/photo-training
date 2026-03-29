@@ -399,6 +399,7 @@ data class SessionLapResultMessage(
 enum class SessionControlAction {
     RESET_TIMER,
     SET_DISPLAY_LIMIT,
+    SET_MOTION_SENSITIVITY,
 }
 
 data class SessionControlCommandMessage(
@@ -406,6 +407,7 @@ data class SessionControlCommandMessage(
     val targetEndpointId: String,
     val senderDeviceName: String,
     val limitMillis: Long?,
+    val sensitivityPercent: Int?,
 ) {
     fun toJsonString(): String {
         return JSONObject()
@@ -414,6 +416,7 @@ data class SessionControlCommandMessage(
             .put("targetEndpointId", targetEndpointId)
             .put("senderDeviceName", senderDeviceName)
             .put("limitMillis", limitMillis ?: JSONObject.NULL)
+            .put("sensitivityPercent", sensitivityPercent ?: JSONObject.NULL)
             .toString()
     }
 
@@ -434,10 +437,17 @@ data class SessionControlCommandMessage(
             val senderDeviceName = decoded.optString("senderDeviceName", "").trim()
             val limitMillis = decoded.readOptionalLong("limitMillis")
                 ?: decoded.readOptionalLong("limitSeconds")?.times(1_000L)
+            val sensitivityPercent = decoded.readOptionalInt("sensitivityPercent")
             if (targetEndpointId.isEmpty() || senderDeviceName.isEmpty()) {
                 return null
             }
             if (action == SessionControlAction.SET_DISPLAY_LIMIT && (limitMillis == null || limitMillis <= 0L)) {
+                return null
+            }
+            if (
+                action == SessionControlAction.SET_MOTION_SENSITIVITY &&
+                (sensitivityPercent == null || sensitivityPercent !in 0..100)
+            ) {
                 return null
             }
             return SessionControlCommandMessage(
@@ -445,6 +455,7 @@ data class SessionControlCommandMessage(
                 targetEndpointId = targetEndpointId,
                 senderDeviceName = senderDeviceName,
                 limitMillis = limitMillis,
+                sensitivityPercent = sensitivityPercent,
             )
         }
     }
@@ -602,6 +613,14 @@ private fun JSONObject.readOptionalString(key: String): String? {
         return null
     }
     return optString(key, "").ifBlank { null }
+}
+
+private fun JSONObject.readOptionalInt(key: String): Int? {
+    if (!has(key) || isNull(key)) {
+        return null
+    }
+    val value = optInt(key, Int.MIN_VALUE)
+    return value.takeIf { it != Int.MIN_VALUE }
 }
 
 private fun JSONObject.readOptionalLongArray(key: String): List<Long> {
