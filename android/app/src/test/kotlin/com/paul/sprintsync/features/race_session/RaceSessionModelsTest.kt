@@ -178,4 +178,77 @@ class RaceSessionModelsTest {
         assertEquals(SessionDeviceRole.DISPLAY, sessionDeviceRoleFromName("display"))
         assertEquals("Display", sessionDeviceRoleLabel(SessionDeviceRole.DISPLAY))
     }
+
+    @Test
+    fun `control command message round-trips reset action`() {
+        val original = SessionControlCommandMessage(
+            action = SessionControlAction.RESET_TIMER,
+            targetEndpointId = "ep-2",
+            senderDeviceName = "OnePlus Controller",
+            limitMillis = null,
+        )
+
+        val parsed = SessionControlCommandMessage.tryParse(original.toJsonString())
+
+        assertNotNull(parsed)
+        assertEquals(SessionControlAction.RESET_TIMER, parsed?.action)
+        assertEquals("ep-2", parsed?.targetEndpointId)
+        assertEquals("OnePlus Controller", parsed?.senderDeviceName)
+        assertNull(parsed?.limitMillis)
+    }
+
+    @Test
+    fun `control command message round-trips set display limit action`() {
+        val original = SessionControlCommandMessage(
+            action = SessionControlAction.SET_DISPLAY_LIMIT,
+            targetEndpointId = "ep-9",
+            senderDeviceName = "OnePlus Controller",
+            limitMillis = 7_260L,
+        )
+
+        val parsed = SessionControlCommandMessage.tryParse(original.toJsonString())
+
+        assertNotNull(parsed)
+        assertEquals(SessionControlAction.SET_DISPLAY_LIMIT, parsed?.action)
+        assertEquals("ep-9", parsed?.targetEndpointId)
+        assertEquals("OnePlus Controller", parsed?.senderDeviceName)
+        assertEquals(7_260L, parsed?.limitMillis)
+    }
+
+    @Test
+    fun `control command parser rejects invalid payload`() {
+        val missingTarget = """{"type":"control_command","action":"reset_timer","targetEndpointId":"","senderDeviceName":"OnePlus"}"""
+        val invalidLimit = """{"type":"control_command","action":"set_display_limit","targetEndpointId":"ep-1","senderDeviceName":"OnePlus","limitMillis":0}"""
+
+        assertNull(SessionControlCommandMessage.tryParse(missingTarget))
+        assertNull(SessionControlCommandMessage.tryParse(invalidLimit))
+    }
+
+    @Test
+    fun `controller targets message round-trips`() {
+        val original = SessionControllerTargetsMessage(
+            senderDeviceName = "Display Host",
+            targets = listOf(
+                SessionControllerTarget(endpointId = "ep-a", deviceName = "Start Phone"),
+                SessionControllerTarget(endpointId = "ep-b", deviceName = "Stop Phone"),
+            ),
+        )
+
+        val parsed = SessionControllerTargetsMessage.tryParse(original.toJsonString())
+
+        assertNotNull(parsed)
+        assertEquals("Display Host", parsed?.senderDeviceName)
+        assertEquals(2, parsed?.targets?.size)
+        assertEquals("ep-a", parsed?.targets?.get(0)?.endpointId)
+        assertEquals("Start Phone", parsed?.targets?.get(0)?.deviceName)
+    }
+
+    @Test
+    fun `controller targets parser rejects invalid payload`() {
+        val missingSender = """{"type":"controller_targets","senderDeviceName":"","targets":[{"endpointId":"ep-1","deviceName":"A"}]}"""
+        val missingTargets = """{"type":"controller_targets","senderDeviceName":"Display Host"}"""
+
+        assertNull(SessionControllerTargetsMessage.tryParse(missingSender))
+        assertNull(SessionControllerTargetsMessage.tryParse(missingTargets))
+    }
 }

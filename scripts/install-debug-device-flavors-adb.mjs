@@ -13,6 +13,14 @@ function run(command, args) {
   return result;
 }
 
+function readDeviceProp(serial, prop) {
+  const result = run('adb', ['-s', serial, 'shell', 'getprop', prop]);
+  if (result.status !== 0) {
+    return '';
+  }
+  return (result.stdout || '').trim();
+}
+
 function fail(message, detail = '') {
   console.error(message);
   if (detail.trim().length > 0) {
@@ -57,6 +65,24 @@ const flavorTargets = [
       ),
     ],
     appId: 'sync.sprint.emll29.single',
+  },
+  {
+    id: 'oneplusSingle',
+    modelMatchers: ['CPH2399', 'cph2399', 'OnePlus'],
+    apkCandidates: [
+      resolve(
+        process.cwd(),
+        'android',
+        'app',
+        'build',
+        'outputs',
+        'apk',
+        'oneplusSingle',
+        'debug',
+        'app-oneplusSingle-debug.apk',
+      ),
+    ],
+    appId: 'sync.sprint.oneplus.single',
   },
   {
     id: 'xiaomiPadDisplay',
@@ -114,8 +140,30 @@ if (readyDevices.length === 0) {
   fail('No ready Android devices found. Connect devices and run "adb devices -l".');
 }
 
-function targetForModel(model) {
-  return flavorTargets.find((target) => target.modelMatchers.some((matcher) => model.includes(matcher)));
+function collectDeviceIdentifiers(device) {
+  const props = [
+    'ro.product.model',
+    'ro.product.device',
+    'ro.product.name',
+    'ro.product.brand',
+    'ro.product.manufacturer',
+    'ro.build.product',
+  ];
+  const values = props
+    .map((prop) => readDeviceProp(device.serial, prop))
+    .filter((value) => value.length > 0);
+  return [device.model, ...values, device.raw]
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function targetForDevice(device) {
+  const identifiers = collectDeviceIdentifiers(device);
+  const normalized = identifiers.join(' | ').toLowerCase();
+  const target = flavorTargets.find((candidate) =>
+    candidate.modelMatchers.some((matcher) => normalized.includes(matcher.toLowerCase())),
+  );
+  return { target, identifiers };
 }
 
 let installs = 0;
@@ -123,10 +171,14 @@ let skipped = 0;
 let failed = 0;
 
 for (const device of readyDevices) {
-  const target = targetForModel(device.model);
+  const { target, identifiers } = targetForDevice(device);
   if (!target) {
     skipped += 1;
-    console.log(`Skipping ${device.serial} (${device.model || 'unknown model'}): no flavor mapping.`);
+    console.log(
+      `Skipping ${device.serial} (${device.model || 'unknown model'}): no flavor mapping. Identifiers: ${identifiers.join(
+        ', ',
+      )}`,
+    );
     continue;
   }
 

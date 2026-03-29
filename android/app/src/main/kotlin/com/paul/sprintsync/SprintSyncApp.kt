@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,7 +20,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -39,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -53,14 +52,11 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.foundation.text.KeyboardOptions as FoundationKeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
 import com.paul.sprintsync.features.race_session.SessionCameraFacing
 import com.paul.sprintsync.features.race_session.SessionDevice
 import com.paul.sprintsync.features.race_session.SessionDeviceRole
@@ -103,7 +99,7 @@ data class SprintSyncUiState(
     val elapsedDisplay: String = "00.00",
     val threshold: Double = 0.006,
     val roiCenterX: Double = 0.5,
-    val roiWidth: Double = 0.03,
+    val roiWidth: Double = 0.06,
     val cooldownMs: Int = 900,
     val processEveryNFrames: Int = 1,
     val observedFps: Double? = null,
@@ -123,22 +119,17 @@ data class SprintSyncUiState(
     val operatingMode: SessionOperatingMode = SessionOperatingMode.SINGLE_DEVICE,
     val displayLapRows: List<DisplayLapRow> = emptyList(),
     val displayConnectedHostName: String? = null,
+    val displayConnectedHostEndpointId: String? = null,
     val displayDiscoveryActive: Boolean = false,
+    val controllerTargetEndpoints: Map<String, String> = emptyMap(),
 )
 
-enum class DisplayRowFlashStatus {
-    NONE,
-    PASS,
-    FAIL,
-}
-
 data class DisplayLapRow(
-    val endpointId: String,
     val deviceName: String,
-    val limitMs: Long? = null,
-    val limitLabel: String? = null,
     val lapTimeLabel: String,
-    val flashStatus: DisplayRowFlashStatus = DisplayRowFlashStatus.NONE,
+    val limitLabel: String? = null,
+    val isOverLimit: Boolean = false,
+    val isUnderLimit: Boolean = false,
 )
 
 @Composable
@@ -152,6 +143,8 @@ fun SprintSyncApp(
     onStartMonitoring: () -> Unit,
     onStartDisplayDiscovery: () -> Unit,
     onConnectDisplayHost: (String) -> Unit,
+    onResetDeviceTimer: (String) -> Unit,
+    onSetDisplayLimit: (String, Long) -> Unit,
     onSetMonitoringEnabled: (Boolean) -> Unit,
     onStopMonitoring: () -> Unit,
     onResetRun: () -> Unit,
@@ -162,13 +155,9 @@ fun SprintSyncApp(
     onUpdateRoiWidth: (Double) -> Unit,
     onUpdateCooldown: (Int) -> Unit,
     onStopHosting: () -> Unit,
-    onSetDisplayLimitMs: (String, Long?) -> Unit,
 ) {
     var showPreview by rememberSaveable { mutableStateOf(true) }
     var showDebugInfo by rememberSaveable { mutableStateOf(false) }
-    var showLimitDialog by rememberSaveable { mutableStateOf(false) }
-    var limitDialogEndpointId by rememberSaveable { mutableStateOf<String?>(null) }
-    var limitDraft by rememberSaveable { mutableStateOf("") }
     val effectiveShowPreview = showPreview
     val localDevice = uiState.devices.firstOrNull { it.isLocal }
     val isDisplayHostMode =
@@ -208,6 +197,8 @@ fun SprintSyncApp(
                         Text(
                             text = when {
                                 uiState.operatingMode == SessionOperatingMode.DISPLAY_HOST -> "Display Monitor"
+                                setupActionProfile == SetupActionProfile.CONTROLLER_ONLY &&
+                                    uiState.operatingMode == SessionOperatingMode.SINGLE_DEVICE -> "Controller"
                                 uiState.operatingMode == SessionOperatingMode.SINGLE_DEVICE -> "Single Device"
                                 uiState.stage == SessionStage.SETUP -> "Setup Session"
                                 uiState.stage == SessionStage.LOBBY -> "Race Lobby"
@@ -304,12 +295,6 @@ fun SprintSyncApp(
                         item {
                             DisplayResultsCard(
                                 rows = uiState.displayLapRows,
-                                showPerRowLimitButton = shouldShowPerRowLimitButton(isDisplayHostMode),
-                                onSetDisplayLimitRequest = { row ->
-                                    limitDialogEndpointId = row.endpointId
-                                    limitDraft = row.limitMs?.toString().orEmpty()
-                                    showLimitDialog = true
-                                },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .fillParentMaxHeight(),
@@ -329,13 +314,15 @@ fun SprintSyncApp(
                                 )
                             }
                         }
-                        item {
-                            RunMetricsCard(
-                                uiState = uiState,
-                                isHost = uiState.isHost,
-                                showDebugInfo = showDebugInfo,
-                                onResetRun = onResetRun,
-                            )
+                        if (setupActionProfile != SetupActionProfile.CONTROLLER_ONLY) {
+                            item {
+                                RunMetricsCard(
+                                    uiState = uiState,
+                                    isHost = uiState.isHost,
+                                    showDebugInfo = showDebugInfo,
+                                    onResetRun = onResetRun,
+                                )
+                            }
                         }
                         if (uiState.clockLockWarningText != null) {
                             item {
@@ -363,15 +350,21 @@ fun SprintSyncApp(
                                 previewViewFactory = previewViewFactory,
                                 roiCenterX = uiState.roiCenterX,
                                 operatingMode = uiState.operatingMode,
+                                setupActionProfile = setupActionProfile,
+                                devices = uiState.devices,
+                                displayConnectedHostEndpointId = uiState.displayConnectedHostEndpointId,
+                                controllerTargetEndpoints = uiState.controllerTargetEndpoints,
                                 discoveredDisplayHosts = uiState.discoveredEndpoints,
                                 displayConnectedHostName = uiState.displayConnectedHostName,
                                 displayDiscoveryActive = uiState.displayDiscoveryActive,
                                 onStartDisplayDiscovery = onStartDisplayDiscovery,
                                 onConnectDisplayHost = onConnectDisplayHost,
+                                onResetDeviceTimer = onResetDeviceTimer,
+                                onSetDisplayLimit = onSetDisplayLimit,
                                 onResetRun = onResetRun,
                             )
                         }
-                        if (showDebugInfo) {
+                        if (showDebugInfo && setupActionProfile != SetupActionProfile.CONTROLLER_ONLY) {
                             item {
                                 AdvancedDetectionCard(
                                     uiState = uiState,
@@ -401,75 +394,23 @@ fun SprintSyncApp(
             }
 
             if (isDisplayHostMode) {
-                Row(
+                OutlinedButton(
+                    onClick = onStopMonitoring,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(top = 20.dp, end = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    border = BorderStroke(2.5.dp, Color.Black),
+                    shape = RoundedCornerShape(50.dp),
                 ) {
-                    OutlinedButton(
-                        onClick = onStopMonitoring,
-                        border = BorderStroke(2.5.dp, Color.Black),
-                        shape = RoundedCornerShape(50.dp),
-                    ) {
-                        Text(
-                            text = "STOP",
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.8.sp,
-                            ),
-                            color = Color.Black,
-                        )
-                    }
+                    Text(
+                        text = "STOP",
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.8.sp,
+                        ),
+                        color = Color.Black,
+                    )
                 }
-            }
-
-            if (showLimitDialog) {
-                AlertDialog(
-                    onDismissRequest = {
-                        limitDialogEndpointId = null
-                        showLimitDialog = false
-                    },
-                    title = {
-                        Text("Display Limit (ms)")
-                    },
-                    text = {
-                        OutlinedTextField(
-                            value = limitDraft,
-                            onValueChange = { candidate ->
-                                limitDraft = candidate.filter { it.isDigit() }
-                            },
-                            singleLine = true,
-                            placeholder = { Text("e.g. 6500") },
-                            keyboardOptions = FoundationKeyboardOptions(keyboardType = KeyboardType.Number),
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                val parsed = limitDraft.trim().toLongOrNull()
-                                val endpointId = limitDialogEndpointId
-                                if (endpointId != null) {
-                                    onSetDisplayLimitMs(endpointId, parsed)
-                                }
-                                limitDialogEndpointId = null
-                                showLimitDialog = false
-                            },
-                        ) {
-                            Text("Save")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(
-                            onClick = {
-                                limitDialogEndpointId = null
-                                showLimitDialog = false
-                            },
-                        ) {
-                            Text("Cancel")
-                        }
-                    },
-                )
             }
         }
     }
@@ -525,7 +466,12 @@ private fun SetupActionsCard(
 ) {
     val setupActionsEnabled = !setupBusy
     val showSingleAction = setupActionProfile != SetupActionProfile.DISPLAY_ONLY
-    val showDisplayAction = setupActionProfile != SetupActionProfile.SINGLE_ONLY
+    val showDisplayAction = setupActionProfile == SetupActionProfile.DISPLAY_ONLY
+    val singleActionLabel = if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+        "Controller"
+    } else {
+        "Single Device"
+    }
 
     SprintSyncCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -540,7 +486,7 @@ private fun SetupActionsCard(
             }
             if (showSingleAction) {
                 PrimaryButton(
-                    text = "Single Device",
+                    text = singleActionLabel,
                     onClick = onStartSingleDevice,
                     enabled = setupActionsEnabled,
                     modifier = Modifier.fillMaxWidth(),
@@ -783,17 +729,48 @@ private fun MonitoringSummaryCard(
     previewViewFactory: SensorNativePreviewViewFactory,
     roiCenterX: Double,
     operatingMode: SessionOperatingMode,
+    setupActionProfile: SetupActionProfile,
+    devices: List<SessionDevice>,
+    displayConnectedHostEndpointId: String?,
+    controllerTargetEndpoints: Map<String, String>,
     discoveredDisplayHosts: Map<String, String>,
     displayConnectedHostName: String?,
     displayDiscoveryActive: Boolean,
     onStartDisplayDiscovery: () -> Unit,
     onConnectDisplayHost: (String) -> Unit,
+    onResetDeviceTimer: (String) -> Unit,
+    onSetDisplayLimit: (String, Long) -> Unit,
     onResetRun: () -> Unit,
 ) {
     val latencyLabel = when (syncModeLabel) {
         "NTP" -> if (latencyMs == null) "-" else "$latencyMs ms"
         "GPS" -> "GPS"
         else -> "-"
+    }
+    val controllerLimitInputs = remember { mutableStateMapOf<String, String>() }
+    var globalLimitInput by rememberSaveable { mutableStateOf("") }
+    val controllerTargetDevices = remember(
+        setupActionProfile,
+        controllerTargetEndpoints,
+        devices,
+        displayConnectedHostEndpointId,
+    ) {
+        if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+            controllerTargetEndpoints.entries.map { target ->
+                SessionDevice(
+                    id = target.key,
+                    name = target.value,
+                    role = SessionDeviceRole.UNASSIGNED,
+                    isLocal = false,
+                )
+            }
+        } else {
+            devices.filter { device ->
+                !device.isLocal &&
+                    device.id != displayConnectedHostEndpointId &&
+                    device.role != SessionDeviceRole.DISPLAY
+            }
+        }
     }
 
     SprintSyncCard {
@@ -814,7 +791,10 @@ private fun MonitoringSummaryCard(
                             color = Color.Gray,
                         )
                     }
-                    if (shouldShowSingleDeviceCameraFacingToggle(operatingMode)) {
+                    if (
+                        setupActionProfile != SetupActionProfile.CONTROLLER_ONLY &&
+                        shouldShowSingleDeviceCameraFacingToggle(operatingMode)
+                    ) {
                         Box(
                             modifier = Modifier.fillMaxWidth(),
                             contentAlignment = Alignment.Center,
@@ -835,7 +815,10 @@ private fun MonitoringSummaryCard(
                             }
                         }
                     }
-                    if (shouldShowMonitoringPreview(operatingMode, effectiveShowPreview)) {
+                    if (
+                        setupActionProfile != SetupActionProfile.CONTROLLER_ONLY &&
+                        shouldShowMonitoringPreview(operatingMode, effectiveShowPreview)
+                    ) {
                         Box(
                             modifier = Modifier.fillMaxWidth(),
                             contentAlignment = Alignment.Center,
@@ -847,37 +830,120 @@ private fun MonitoringSummaryCard(
                         }
                     }
                     if (shouldShowDisplayRelayControls(operatingMode)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            PrimaryButton(
-                                text = if (displayDiscoveryActive) "Display: Discovering" else "Display",
-                                onClick = onStartDisplayDiscovery,
-                                modifier = Modifier.weight(1f),
-                            )
-                            OutlinedButton(
-                                onClick = onResetRun,
-                                modifier = Modifier.weight(1f),
+                        if (setupActionProfile != SetupActionProfile.CONTROLLER_ONLY) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Text("Reset")
+                                PrimaryButton(
+                                    text = if (displayDiscoveryActive) "Display: Discovering" else "Display",
+                                    onClick = onStartDisplayDiscovery,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                OutlinedButton(
+                                    onClick = onResetRun,
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Text("Reset")
+                                }
+                            }
+                            if (displayConnectedHostName != null) {
+                                Text(
+                                    text = "Connected to $displayConnectedHostName",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.Gray,
+                                )
+                            }
+                            val hosts = discoveredDisplayHosts.entries.toList()
+                            if (hosts.isNotEmpty()) {
+                                hosts.forEach { host ->
+                                    OutlinedButton(
+                                        onClick = { onConnectDisplayHost(host.key) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        Text("Join ${host.value}")
+                                    }
+                                }
                             }
                         }
-                        if (displayConnectedHostName != null) {
+                        if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+                            Spacer(Modifier.height(6.dp))
                             Text(
-                                text = "Connected to $displayConnectedHostName",
-                                style = MaterialTheme.typography.bodySmall,
+                                text = "Controller Targets",
+                                style = MaterialTheme.typography.labelMedium,
                                 color = Color.Gray,
                             )
-                        }
-                        val hosts = discoveredDisplayHosts.entries.toList()
-                        if (hosts.isNotEmpty()) {
-                            hosts.forEach { host ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
                                 OutlinedButton(
-                                    onClick = { onConnectDisplayHost(host.key) },
-                                    modifier = Modifier.fillMaxWidth(),
+                                    onClick = {
+                                        controllerTargetDevices.forEach { device ->
+                                            onResetDeviceTimer(device.id)
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
                                 ) {
-                                    Text("Join ${host.value}")
+                                    Text("Reset All")
+                                }
+                                OutlinedTextField(
+                                    value = globalLimitInput,
+                                    onValueChange = { globalLimitInput = it.filter(Char::isDigit) },
+                                    label = { Text("Limit All (ms)") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                OutlinedButton(
+                                    onClick = {
+                                        val millis = globalLimitInput.toLongOrNull()
+                                        if (millis != null && millis > 0L) {
+                                            controllerTargetDevices.forEach { device ->
+                                                onSetDisplayLimit(device.id, millis)
+                                            }
+                                        }
+                                    },
+                                ) {
+                                    Text("Set All")
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            controllerTargetDevices.forEach { device ->
+                                val limitInput = controllerLimitInputs[device.id].orEmpty()
+                                Text(
+                                    text = device.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    OutlinedButton(
+                                        onClick = { onResetDeviceTimer(device.id) },
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        Text("Reset")
+                                    }
+                                    OutlinedTextField(
+                                        value = limitInput,
+                                        onValueChange = { controllerLimitInputs[device.id] = it.filter(Char::isDigit) },
+                                        label = { Text("Limit (ms)") },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    OutlinedButton(
+                                        onClick = {
+                                            val seconds = limitInput.toLongOrNull()
+                                            if (seconds != null && seconds > 0L) {
+                                                onSetDisplayLimit(device.id, seconds)
+                                            }
+                                        },
+                                    ) {
+                                        Text("Set")
+                                    }
                                 }
                             }
                         }
@@ -1246,13 +1312,11 @@ private fun RunMetricsCard(
 }
 
 @Composable
-private fun DisplayResultsCard(
-    rows: List<DisplayLapRow>,
-    showPerRowLimitButton: Boolean,
-    onSetDisplayLimitRequest: (DisplayLapRow) -> Unit,
-    modifier: Modifier = Modifier,
-) {
+private fun DisplayResultsCard(rows: List<DisplayLapRow>, modifier: Modifier = Modifier) {
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val displayCardBackground = Color(0xFFFFCC00)
+        val displayTimeColor = Color(0xFF000000)
+        val displayDeviceColor = Color(0xFF000000)
         val density = LocalDensity.current
         val layout = displayLayoutSpecForCount(rows.size)
         if (rows.isEmpty()) {
@@ -1287,82 +1351,56 @@ private fun DisplayResultsCard(
             horizontalArrangement = Arrangement.spacedBy(layout.rowSpacing),
         ) {
             items(rows) { row ->
-                val rowColors = displayColorsForFlashStatus(row.flashStatus)
-                Box(
+                val cardBackground = when {
+                    row.isOverLimit -> Color(0xFFD32F2F)
+                    row.isUnderLimit -> Color(0xFF2E7D32)
+                    else -> displayCardBackground
+                }
+                val foregroundColor = if (row.isOverLimit || row.isUnderLimit) Color.White else displayDeviceColor
+                Column(
                     modifier = Modifier
                         .width(cardWidth)
                         .height(cardHeight)
                         .clip(RoundedCornerShape(24.dp))
-                        .background(rowColors.background)
+                        .background(cardBackground)
                         .padding(horizontal = layout.horizontalPadding, vertical = layout.verticalPadding),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
                 ) {
-                    if (showPerRowLimitButton) {
-                        OutlinedButton(
-                            onClick = { onSetDisplayLimitRequest(row) },
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(top = 2.dp),
-                            border = BorderStroke(2.dp, Color.Black),
-                            shape = RoundedCornerShape(50.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                        ) {
-                            Text(
-                                text = "LIMIT",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 0.6.sp,
-                                ),
-                                color = Color.Black,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Clip,
-                            )
-                        }
-                    }
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(top = if (showPerRowLimitButton) 48.dp else 0.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                    ) {
-                        Text(
-                            text = row.deviceName,
-                            style = MaterialTheme.typography.bodySmall.merge(
+                    Text(
+                        text = row.deviceName,
+                        style = MaterialTheme.typography.bodySmall.merge(
+                            TextStyle(
+                                fontSize = clampedDeviceFont,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.5.sp,
+                            ),
+                        ),
+                        color = foregroundColor,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = row.lapTimeLabel,
+                        style = MaterialTheme.typography.displayLarge.merge(
+                            InterExtraBoldTabularTypography.merge(
                                 TextStyle(
-                                    fontSize = clampedDeviceFont,
-                                    fontWeight = FontWeight.SemiBold,
-                                    letterSpacing = 0.5.sp,
+                                    fontSize = clampedTimeFont,
                                 ),
                             ),
-                            color = rowColors.deviceLabel,
-                            textAlign = TextAlign.Center,
-                        )
-                        row.limitLabel?.let { limitLabel ->
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = limitLabel,
-                                style = MaterialTheme.typography.titleMedium.merge(
-                                    InterExtraBoldTabularTypography,
-                                ),
-                                color = rowColors.deviceLabel,
-                                textAlign = TextAlign.Center,
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
+                        ),
+                        color = if (row.isOverLimit || row.isUnderLimit) Color.White else displayTimeColor,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                    row.limitLabel?.let { label ->
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = row.lapTimeLabel,
-                            style = MaterialTheme.typography.displayLarge.merge(
-                                InterExtraBoldTabularTypography.merge(
-                                    TextStyle(
-                                        fontSize = clampedTimeFont,
-                                    ),
-                                ),
-                            ),
-                            color = rowColors.timeValue,
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = foregroundColor,
                             textAlign = TextAlign.Center,
-                            maxLines = 1,
-                            softWrap = false,
                         )
                     }
                 }
@@ -1417,12 +1455,14 @@ internal fun shouldShowSetupPermissionWarning(permissionGranted: Boolean, denied
 enum class SetupActionProfile {
     SINGLE_ONLY,
     DISPLAY_ONLY,
+    CONTROLLER_ONLY,
 }
 
 internal fun resolveSetupActionProfile(autoStartRole: String): SetupActionProfile {
     return when (autoStartRole.trim().lowercase()) {
         "single", "client" -> SetupActionProfile.SINGLE_ONLY
         "display", "host" -> SetupActionProfile.DISPLAY_ONLY
+        "controller" -> SetupActionProfile.CONTROLLER_ONLY
         else -> SetupActionProfile.SINGLE_ONLY
     }
 }
@@ -1447,7 +1487,8 @@ internal fun shouldShowMonitoringConnectionDebugInfo(showDebugInfo: Boolean): Bo
 internal fun shouldShowSingleFlavorConnectingCard(
     setupActionProfile: SetupActionProfile,
     connectedEndpointCount: Int,
-): Boolean = setupActionProfile == SetupActionProfile.SINGLE_ONLY && connectedEndpointCount == 0
+): Boolean = (setupActionProfile == SetupActionProfile.SINGLE_ONLY || setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) &&
+    connectedEndpointCount == 0
 
 internal fun shouldShowMonitoringPreview(mode: SessionOperatingMode, effectiveShowPreview: Boolean): Boolean =
     effectiveShowPreview
@@ -1457,8 +1498,6 @@ internal fun shouldShowMonitoringPreviewToggle(mode: SessionOperatingMode): Bool
 
 internal fun shouldShowInlineMonitoringResetButton(mode: SessionOperatingMode): Boolean =
     mode != SessionOperatingMode.SINGLE_DEVICE
-
-internal fun shouldShowPerRowLimitButton(isDisplayHostMode: Boolean): Boolean = isDisplayHostMode
 
 internal fun shouldShowRunDetailMetrics(mode: SessionOperatingMode): Boolean =
     mode != SessionOperatingMode.SINGLE_DEVICE
@@ -1552,32 +1591,6 @@ internal fun clampDisplayLabelFont(base: TextUnit, rowHeight: Dp, density: andro
     val minReadable = 12.sp
     val clamped = minOf(base.value, maxByHeight.value).sp
     return maxOf(clamped.value, minReadable.value).sp
-}
-
-internal data class DisplayRowColors(
-    val background: Color,
-    val timeValue: Color,
-    val deviceLabel: Color,
-)
-
-internal fun displayColorsForFlashStatus(status: DisplayRowFlashStatus): DisplayRowColors {
-    return when (status) {
-        DisplayRowFlashStatus.PASS -> DisplayRowColors(
-            background = Color(0xFF1F8B2B),
-            timeValue = Color.White,
-            deviceLabel = Color.White,
-        )
-        DisplayRowFlashStatus.FAIL -> DisplayRowColors(
-            background = Color(0xFFB71C1C),
-            timeValue = Color.White,
-            deviceLabel = Color.White,
-        )
-        DisplayRowFlashStatus.NONE -> DisplayRowColors(
-            background = Color(0xFFFFCC00),
-            timeValue = Color(0xFF000000),
-            deviceLabel = Color(0xFF000000),
-        )
-    }
 }
 
 internal fun deviceRoleOptions(): List<SessionDeviceRole> {

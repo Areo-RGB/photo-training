@@ -30,11 +30,16 @@ import com.paul.sprintsync.features.motion_detection.MotionCameraFacing
 import com.paul.sprintsync.features.motion_detection.MotionDetectionController
 import com.paul.sprintsync.features.race_session.RaceSessionController
 import com.paul.sprintsync.features.race_session.SessionCameraFacing
+import com.paul.sprintsync.features.race_session.SessionControlAction
+import com.paul.sprintsync.features.race_session.SessionControlCommandMessage
+import com.paul.sprintsync.features.race_session.SessionControllerIdentityMessage
+import com.paul.sprintsync.features.race_session.SessionControllerTarget
+import com.paul.sprintsync.features.race_session.SessionControllerTargetsMessage
 import com.paul.sprintsync.features.race_session.SessionDeviceRole
+import com.paul.sprintsync.features.race_session.SessionLapResultMessage
 import com.paul.sprintsync.features.race_session.SessionNetworkRole
 import com.paul.sprintsync.features.race_session.SessionOperatingMode
 import com.paul.sprintsync.features.race_session.SessionStage
-import com.paul.sprintsync.features.race_session.SessionTriggerMessage
 import com.paul.sprintsync.sensor_native.SensorNativeController
 import com.paul.sprintsync.sensor_native.SensorNativeEvent
 import com.paul.sprintsync.sensor_native.SensorNativePreviewViewFactory
@@ -52,8 +57,6 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
         private const val TIMER_REFRESH_INTERVAL_MS = 100L
         private const val TAG = "SprintSyncRuntime"
         private const val MAX_PENDING_LAPS = 100
-        private const val DISPLAY_LIMIT_FLASH_DURATION_MS = 1_200L
-        private const val DISPLAY_LIMIT_FLASH_DURATION_NANOS = DISPLAY_LIMIT_FLASH_DURATION_MS * 1_000_000L
         private const val GPS_LOCK_VALIDITY_NANOS = 10_000_000_000L
         private const val GPS_REACQUIRE_REQUEST_THROTTLE_NANOS = 5_000_000_000L
     }
@@ -73,20 +76,27 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
     private var displayConnectedHostEndpointId: String? = null
     private var displayConnectedHostName: String? = null
     private val displayDiscoveredHosts = linkedMapOf<String, String>()
+    private val controllerTargetDeviceNamesByEndpointId = linkedMapOf<String, String>()
+    private val displayControllerEndpointIds = linkedSetOf<String>()
     private val displayHostDeviceNamesByEndpointId = linkedMapOf<String, String>()
     private val displayLatestLapByEndpointId = linkedMapOf<String, Long>()
-    private val displayStartedAtElapsedNanosByEndpointId = linkedMapOf<String, Long>()
-    private val displayStartedAtSensorNanosByEndpointId = linkedMapOf<String, Long>()
-    private val displayFlashByEndpointId = linkedMapOf<String, DisplayFlashWindow>()
-    private val displayLimitMsByEndpointId = linkedMapOf<String, Long>()
-    private var lastRelayedStartSensorNanos: Long? = null
+    private val displayLimitMillisByEndpointId = linkedMapOf<String, Long>()
     private var lastRelayedStopSensorNanos: Long? = null
     private var displayReconnectionPending: Boolean = false
     private var lastGpsReacquireRequestElapsedNanos: Long? = null
-    private val pendingStartTriggers = ArrayDeque<SessionTriggerMessage>()
+    private val pendingLapResults = ArrayDeque<SessionLapResultMessage>()
     private var pendingPermissionScope: PermissionScope = PermissionScope.NETWORK_ONLY
     private var autoDisplayReconnectJob: Job? = null
     private var autoDisplayReconnectAttempts: Int = 0
+    private val effectiveAutoStartRole: String = resolveEffectiveAutoStartRole(
+        configuredRole = BuildConfig.AUTO_START_ROLE,
+        flavorName = BuildConfig.FLAVOR,
+    )
+    private val setupActionProfile: SetupActionProfile = if (isOneplusControllerFlavor(BuildConfig.FLAVOR)) {
+        SetupActionProfile.CONTROLLER_ONLY
+    } else {
+        resolveSetupActionProfile(effectiveAutoStartRole)
+    }
 
     private enum class PermissionScope {
         NETWORK_ONLY,
@@ -142,7 +152,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                 SprintSyncApp(
                     uiState = uiState.value,
                     previewViewFactory = previewViewFactory,
-                    setupActionProfile = resolveSetupActionProfile(BuildConfig.AUTO_START_ROLE),
+                    setupActionProfile = setupActionProfile,
                     onRequestPermissions = {
                         if (uiState.value.setupBusy) return@SprintSyncApp
                         setSetupBusy(true)
@@ -150,7 +160,13 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                             setSetupBusy(false)
                         }
                     },
-                    onStartSingleDevice = { startSingleDeviceMode(enableAutoDisplayReconnect = true) },
+                    onStartSingleDevice = {
+                        if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+                            startControllerMode(enableAutoDisplayReconnect = true)
+                        } else {
+                            startSingleDeviceMode(enableAutoDisplayReconnect = true)
+                        }
+                    },
                     onStartDisplayHost = { startDisplayHostMode() },
                     onStartMonitoring = {
                         requestPermissionsIfNeeded(PermissionScope.CAMERA_AND_NETWORK) {
@@ -183,6 +199,20 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                             syncControllerSummaries()
                         }
                     },
+                    onResetDeviceTimer = { targetEndpointId ->
+                        sendControllerCommandToDisplayHost(
+                            action = SessionControlAction.RESET_TIMER,
+                            targetEndpointId = targetEndpointId,
+                            limitMillis = null,
+                        )
+                    },
+                    onSetDisplayLimit = { targetEndpointId, limitMillis ->
+                        sendControllerCommandToDisplayHost(
+                            action = SessionControlAction.SET_DISPLAY_LIMIT,
+                            targetEndpointId = targetEndpointId,
+                            limitMillis = limitMillis,
+                        )
+                    },
                     onSetMonitoringEnabled = { enabled ->
                         userMonitoringEnabled = enabled
                         if (!enabled) {
@@ -207,6 +237,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                                 displayConnectedHostEndpointId = null
                                 displayConnectedHostName = null
                                 displayDiscoveredHosts.clear()
+                                controllerTargetDeviceNamesByEndpointId.clear()
                             }
                             SessionOperatingMode.DISPLAY_HOST -> {
                                 raceSessionController.stopDisplayHostMode()
@@ -218,6 +249,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                                 )
                                 clearDisplayRelayReconnectionState()
                                 clearDisplayHostLapState()
+                                controllerTargetDeviceNamesByEndpointId.clear()
                             }
                         }
                         syncControllerSummaries()
@@ -275,18 +307,9 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                         displayConnectedHostEndpointId = null
                         displayConnectedHostName = null
                         displayDiscoveredHosts.clear()
+                        controllerTargetDeviceNamesByEndpointId.clear()
                         updateUiState { copy(networkSummary = "Stopped") }
                         appendEvent("hosting stopped")
-                        syncControllerSummaries()
-                    },
-                    onSetDisplayLimitMs = { endpointId, value ->
-                        val normalized = value?.takeIf { it > 0L }
-                        if (normalized == null) {
-                            displayLimitMsByEndpointId.remove(endpointId)
-                            displayFlashByEndpointId.remove(endpointId)
-                        } else {
-                            displayLimitMsByEndpointId[endpointId] = normalized
-                        }
                         syncControllerSummaries()
                     },
                 )
@@ -370,12 +393,18 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
     }
 
     private fun maybeAutoStartFlavorMode() {
-        when (resolveAutoStartRole(BuildConfig.AUTO_START_ROLE)) {
+        when (resolveAutoStartRole(effectiveAutoStartRole)) {
             AutoStartRole.NONE -> Unit
             AutoStartRole.DISPLAY -> {
                 lifecycleScope.launch {
                     delay(250)
                     startDisplayHostMode()
+                }
+            }
+            AutoStartRole.CONTROLLER -> {
+                lifecycleScope.launch {
+                    delay(250)
+                    startControllerMode(enableAutoDisplayReconnect = true)
                 }
             }
             AutoStartRole.SINGLE -> {
@@ -401,9 +430,39 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
             displayConnectedHostEndpointId = null
             displayConnectedHostName = null
             displayDiscoveredHosts.clear()
+            controllerTargetDeviceNamesByEndpointId.clear()
             lastRelayedStopSensorNanos = null
             raceSessionController.startSingleDeviceMonitoring()
             userMonitoringEnabled = true
+            if (enableAutoDisplayReconnect) {
+                displayReconnectionPending = true
+                startAutoDisplayReconnectLoop()
+            } else {
+                stopAutoDisplayReconnectLoop()
+            }
+            setSetupBusy(false)
+            syncControllerSummaries()
+        }
+    }
+
+    private fun startControllerMode(enableAutoDisplayReconnect: Boolean) {
+        if (uiState.value.setupBusy) return
+        setSetupBusy(true)
+        requestPermissionsIfNeeded(PermissionScope.NETWORK_ONLY) {
+            clearDisplayRelayReconnectionState()
+            connectionsManager.stopAll()
+            connectionsManager.configureNativeClockSyncHost(
+                enabled = false,
+                requireSensorDomainClock = false,
+            )
+            displayDiscoveryActive = false
+            displayConnectedHostEndpointId = null
+            displayConnectedHostName = null
+            displayDiscoveredHosts.clear()
+            controllerTargetDeviceNamesByEndpointId.clear()
+            raceSessionController.setNetworkRole(SessionNetworkRole.CLIENT)
+            raceSessionController.setSessionStage(controllerInitialStage())
+            userMonitoringEnabled = false
             if (enableAutoDisplayReconnect) {
                 displayReconnectionPending = true
                 startAutoDisplayReconnectLoop()
@@ -427,6 +486,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
             displayConnectedHostEndpointId = null
             displayConnectedHostName = null
             displayDiscoveredHosts.clear()
+            controllerTargetDeviceNamesByEndpointId.clear()
             connectionsManager.configureNativeClockSyncHost(
                 enabled = false,
                 requireSensorDomainClock = false,
@@ -507,6 +567,9 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                 when (event) {
                     is NearbyEvent.EndpointFound -> {
                         displayDiscoveredHosts[event.endpointId] = event.endpointName
+                        if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+                            raceSessionController.onNearbyEvent(event)
+                        }
                         // Auto-connect if not connected or if reconnection is pending
                         if (displayConnectedHostEndpointId == null || displayReconnectionPending) {
                             try {
@@ -527,6 +590,9 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                     }
                     is NearbyEvent.EndpointLost -> {
                         displayDiscoveredHosts.remove(event.endpointId)
+                        if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+                            raceSessionController.onNearbyEvent(event)
+                        }
                     }
                     is NearbyEvent.ConnectionResult -> {
                         if (event.connected) {
@@ -539,23 +605,61 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                                 displayReconnectionPending = false
                                 flushPendingLapResults()
                             }
+                            if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+                                val payload = SessionControllerIdentityMessage(
+                                    senderDeviceName = localEndpointName(),
+                                ).toJsonString()
+                                connectionsManager.sendMessage(event.endpointId, payload) { result ->
+                                    result.exceptionOrNull()?.let { error ->
+                                        appendEvent("controller identity error: ${error.localizedMessage ?: "unknown"}")
+                                    }
+                                }
+                            }
                             startAutoDisplayReconnectLoop()
                         } else if (displayConnectedHostEndpointId == event.endpointId) {
                             displayConnectedHostEndpointId = null
                             displayConnectedHostName = null
+                            controllerTargetDeviceNamesByEndpointId.clear()
                             displayReconnectionPending = true
                             startAutoDisplayReconnectLoop()
+                        }
+                        if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+                            raceSessionController.onNearbyEvent(event)
                         }
                     }
                     is NearbyEvent.EndpointDisconnected -> {
                         if (displayConnectedHostEndpointId == event.endpointId) {
                             displayConnectedHostEndpointId = null
                             displayConnectedHostName = null
+                            controllerTargetDeviceNamesByEndpointId.clear()
                             displayReconnectionPending = true
                             startAutoDisplayReconnectLoop()
                         }
+                        if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+                            raceSessionController.onNearbyEvent(event)
+                        }
                     }
-                    is NearbyEvent.PayloadReceived, is NearbyEvent.ClockSyncSampleReceived, is NearbyEvent.Error -> Unit
+                    is NearbyEvent.PayloadReceived -> {
+                        SessionControlCommandMessage.tryParse(event.message)?.let { command ->
+                            if (command.action == SessionControlAction.RESET_TIMER) {
+                                raceSessionController.resetRun()
+                                appendEvent("remote reset from ${command.senderDeviceName}")
+                            }
+                        }
+                        SessionControllerTargetsMessage.tryParse(event.message)?.let { snapshot ->
+                            val hostEndpoint = displayConnectedHostEndpointId
+                            if (hostEndpoint != null && event.endpointId == hostEndpoint) {
+                                controllerTargetDeviceNamesByEndpointId.clear()
+                                snapshot.targets.forEach { target ->
+                                    controllerTargetDeviceNamesByEndpointId[target.endpointId] = target.deviceName
+                                }
+                            }
+                        }
+                        if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+                            raceSessionController.onNearbyEvent(event)
+                        }
+                    }
+                    is NearbyEvent.ClockSyncSampleReceived, is NearbyEvent.Error -> Unit
                 }
             }
             SessionOperatingMode.DISPLAY_HOST -> {
@@ -567,10 +671,10 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                     }
                     is NearbyEvent.EndpointLost -> {
                         displayHostDeviceNamesByEndpointId.remove(event.endpointId)
+                        displayControllerEndpointIds.remove(event.endpointId)
                         displayLatestLapByEndpointId.remove(event.endpointId)
-                        displayStartedAtElapsedNanosByEndpointId.remove(event.endpointId)
-                        displayStartedAtSensorNanosByEndpointId.remove(event.endpointId)
-                        displayLimitMsByEndpointId.remove(event.endpointId)
+                        displayLimitMillisByEndpointId.remove(event.endpointId)
+                        broadcastControllerTargetsSnapshotToConnectedEndpoints()
                     }
                     is NearbyEvent.ConnectionResult -> {
                         if (event.connected) {
@@ -580,57 +684,68 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                             }
                         } else {
                             displayHostDeviceNamesByEndpointId.remove(event.endpointId)
+                            displayControllerEndpointIds.remove(event.endpointId)
                             displayLatestLapByEndpointId.remove(event.endpointId)
-                            displayStartedAtElapsedNanosByEndpointId.remove(event.endpointId)
-                            displayStartedAtSensorNanosByEndpointId.remove(event.endpointId)
-                            displayLimitMsByEndpointId.remove(event.endpointId)
-                            displayFlashByEndpointId.remove(event.endpointId)
+                            displayLimitMillisByEndpointId.remove(event.endpointId)
                         }
+                        broadcastControllerTargetsSnapshotToConnectedEndpoints()
                     }
                     is NearbyEvent.EndpointDisconnected -> {
                         displayHostDeviceNamesByEndpointId.remove(event.endpointId)
+                        displayControllerEndpointIds.remove(event.endpointId)
                         displayLatestLapByEndpointId.remove(event.endpointId)
-                        displayStartedAtElapsedNanosByEndpointId.remove(event.endpointId)
-                        displayStartedAtSensorNanosByEndpointId.remove(event.endpointId)
-                        displayLimitMsByEndpointId.remove(event.endpointId)
-                        displayFlashByEndpointId.remove(event.endpointId)
+                        displayLimitMillisByEndpointId.remove(event.endpointId)
+                        broadcastControllerTargetsSnapshotToConnectedEndpoints()
                     }
                     is NearbyEvent.PayloadReceived -> {
-                        SessionTriggerMessage.tryParse(event.message)?.let { trigger ->
-                            when (trigger.triggerType.lowercase()) {
-                                "start" -> {
-                                    displayStartedAtElapsedNanosByEndpointId[event.endpointId] = SystemClock.elapsedRealtimeNanos()
-                                    displayStartedAtSensorNanosByEndpointId[event.endpointId] = trigger.triggerSensorNanos
-                                    displayLatestLapByEndpointId.remove(event.endpointId)
-                                    displayFlashByEndpointId.remove(event.endpointId)
+                        var handledControllerIdentity = false
+                        var handledControl = false
+                        SessionControllerIdentityMessage.tryParse(event.message)?.let { identity ->
+                            handledControllerIdentity = true
+                            displayControllerEndpointIds.add(event.endpointId)
+                            if (identity.senderDeviceName.isNotBlank()) {
+                                displayHostDeviceNamesByEndpointId[event.endpointId] = identity.senderDeviceName
+                            }
+                            broadcastControllerTargetsSnapshotToConnectedEndpoints()
+                        }
+                        if (!handledControllerIdentity) {
+                            SessionControlCommandMessage.tryParse(event.message)?.let { command ->
+                            handledControl = true
+                            when (command.action) {
+                                SessionControlAction.RESET_TIMER -> {
+                                    displayLatestLapByEndpointId.remove(command.targetEndpointId)
+                                    if (connectionsManager.connectedEndpoints().contains(command.targetEndpointId)) {
+                                        connectionsManager.sendMessage(command.targetEndpointId, command.toJsonString()) { result ->
+                                            result.exceptionOrNull()?.let { error ->
+                                                appendEvent("reset route error: ${error.localizedMessage ?: "unknown"}")
+                                            }
+                                        }
+                                    } else {
+                                        appendEvent("reset route skipped: target not connected")
+                                    }
                                 }
-                                "stop" -> {
-                                    val startedAtSensor = displayStartedAtSensorNanosByEndpointId[event.endpointId]
-                                    val startedAt = displayStartedAtElapsedNanosByEndpointId[event.endpointId]
-                                    if (startedAt != null && displayLatestLapByEndpointId[event.endpointId] == null) {
-                                        val nowElapsed = SystemClock.elapsedRealtimeNanos()
-                                        val elapsedNanos = if (startedAtSensor != null && trigger.triggerSensorNanos > 0L) {
-                                            (trigger.triggerSensorNanos - startedAtSensor).coerceAtLeast(0L)
-                                        } else {
-                                            (nowElapsed - startedAt).coerceAtLeast(0L)
-                                        }
-                                        displayLatestLapByEndpointId[event.endpointId] = elapsedNanos
-                                        val flashStatus = displayFlashStatusForElapsed(
-                                            limitMs = displayLimitMsByEndpointId[event.endpointId],
-                                            elapsedNanos = elapsedNanos,
-                                        )
-                                        if (flashStatus != DisplayRowFlashStatus.NONE) {
-                                            displayFlashByEndpointId[event.endpointId] = DisplayFlashWindow(
-                                                status = flashStatus,
-                                                expiresAtElapsedNanos = nowElapsed + DISPLAY_LIMIT_FLASH_DURATION_NANOS,
-                                            )
-                                        }
-                                        displayStartedAtElapsedNanosByEndpointId.remove(event.endpointId)
-                                        displayStartedAtSensorNanosByEndpointId.remove(event.endpointId)
+                                SessionControlAction.SET_DISPLAY_LIMIT -> {
+                                    val limitMillis = command.limitMillis
+                                    if (limitMillis != null && limitMillis > 0L) {
+                                        displayLimitMillisByEndpointId[command.targetEndpointId] = limitMillis
+                                    } else {
+                                        displayLimitMillisByEndpointId.remove(command.targetEndpointId)
                                     }
                                 }
                             }
                         }
+                        }
+                        if (!handledControllerIdentity && !handledControl) {
+                            SessionLapResultMessage.tryParse(event.message)?.let { result ->
+                                val elapsedNanos = result.stoppedSensorNanos - result.startedSensorNanos
+                                val senderDeviceName = result.senderDeviceName.trim()
+                                if (senderDeviceName.isNotEmpty()) {
+                                    displayHostDeviceNamesByEndpointId[event.endpointId] = senderDeviceName
+                                }
+                                displayLatestLapByEndpointId[event.endpointId] = elapsedNanos
+                            }
+                        }
+                        broadcastControllerTargetsSnapshotToConnectedEndpoints()
                     }
                     is NearbyEvent.ClockSyncSampleReceived,
                     is NearbyEvent.Error,
@@ -810,21 +925,6 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
             LocalCaptureAction.NONE -> Unit
         }
 
-        val timerEligibleConnectedEndpoints = when (mode) {
-            SessionOperatingMode.SINGLE_DEVICE -> setOfNotNull(displayConnectedHostEndpointId)
-            SessionOperatingMode.DISPLAY_HOST -> connectionsManager.connectedEndpoints()
-        }
-        val hasPendingDisplayLaps = timerEligibleConnectedEndpoints.isNotEmpty() &&
-            timerEligibleConnectedEndpoints.any { endpointId ->
-                displayLatestLapByEndpointId[endpointId] == null
-            }
-        val hasRunningDisplayTimers = timerEligibleConnectedEndpoints.any { endpointId ->
-            displayStartedAtElapsedNanosByEndpointId[endpointId] != null &&
-                displayLatestLapByEndpointId[endpointId] == null
-        }
-        val shouldKeepDisplayTimerRefreshActive =
-            (mode == SessionOperatingMode.DISPLAY_HOST || isPassiveDisplayClient) &&
-                (hasPendingDisplayLaps || hasRunningDisplayTimers)
         if (
             shouldKeepTimerRefreshActive(
                 monitoringActive = raceState.monitoringActive &&
@@ -832,7 +932,7 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                     !isPassiveDisplayClient,
                 isAppResumed = isAppResumed,
                 hasStopSensor = raceState.timeline.hostStopSensorNanos != null,
-            ) || shouldKeepDisplayTimerRefreshActive
+            )
         ) {
             startTimerRefreshLoop()
         } else {
@@ -863,53 +963,38 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
             raceState.timeline
         }
         if (mode == SessionOperatingMode.SINGLE_DEVICE) {
-            val activeStartNanos = raceState.timeline.hostStartSensorNanos
             val completed = raceState.latestCompletedTimeline
             val stopNanos = completed?.hostStopSensorNanos
+            val startNanos = completed?.hostStartSensorNanos
             val hostEndpoint = displayConnectedHostEndpointId
             if (
-                activeStartNanos != null &&
-                activeStartNanos != lastRelayedStartSensorNanos
+                startNanos != null &&
+                stopNanos != null &&
+                stopNanos != lastRelayedStopSensorNanos
             ) {
-                val startTrigger = SessionTriggerMessage(
-                    triggerType = "start",
-                    triggerSensorNanos = activeStartNanos,
-                )
-                if (hostEndpoint != null) {
-                    connectionsManager.sendMessage(hostEndpoint, startTrigger.toJsonString()) { result ->
-                        result.exceptionOrNull()?.let { error ->
-                            appendEvent("start relay error: ${error.localizedMessage ?: "unknown"}")
-                        }
-                    }
-                    lastRelayedStartSensorNanos = activeStartNanos
-                } else if (displayReconnectionPending) {
-                    if (pendingStartTriggers.size >= MAX_PENDING_LAPS) {
-                        pendingStartTriggers.removeFirst()
-                    }
-                    pendingStartTriggers.addLast(startTrigger)
-                    lastRelayedStartSensorNanos = activeStartNanos
-                }
-            }
-            if (stopNanos != null && stopNanos != lastRelayedStopSensorNanos) {
-                val stopTrigger = SessionTriggerMessage(
-                    triggerType = "stop",
-                    triggerSensorNanos = stopNanos,
+                val lapMessage = SessionLapResultMessage(
+                    senderDeviceName = localEndpointName(),
+                    startedSensorNanos = startNanos,
+                    stoppedSensorNanos = stopNanos,
                 )
 
                 if (hostEndpoint != null) {
-                    connectionsManager.sendMessage(hostEndpoint, stopTrigger.toJsonString()) { result ->
+                    // Connected - send immediately
+                    connectionsManager.sendMessage(hostEndpoint, lapMessage.toJsonString()) { result ->
                         result.exceptionOrNull()?.let { error ->
-                            appendEvent("stop relay error: ${error.localizedMessage ?: "unknown"}")
+                            appendEvent("lap relay error: ${error.localizedMessage ?: "unknown"}")
                         }
                     }
                     lastRelayedStopSensorNanos = stopNanos
                 } else if (displayReconnectionPending) {
-                    if (pendingStartTriggers.size >= MAX_PENDING_LAPS) {
-                        pendingStartTriggers.removeFirst()
+                    // Disconnected but trying to reconnect - cache for later
+                    if (pendingLapResults.size >= MAX_PENDING_LAPS) {
+                        pendingLapResults.removeFirst() // Drop oldest to make room
                     }
-                    pendingStartTriggers.addLast(stopTrigger)
+                    pendingLapResults.addLast(lapMessage)
                     lastRelayedStopSensorNanos = stopNanos
                 }
+                // If disconnected and NOT trying to reconnect, don't cache (original behavior)
             }
         }
 
@@ -992,27 +1077,19 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
 
             else -> "Unlocked"
         }
-        val nowElapsedNanos = SystemClock.elapsedRealtimeNanos()
-        val connectedEndpointIds = connectionsManager.connectedEndpoints()
-        val prunedDisplayFlashes = pruneDisplayFlashWindowsByEndpointId(
-            connectedEndpointIds = connectedEndpointIds,
-            flashWindowsByEndpointId = displayFlashByEndpointId,
-            nowElapsedNanos = nowElapsedNanos,
-        )
-        val activeDisplayFlashes = prunedDisplayFlashes.mapValues { (_, flashWindow) -> flashWindow.status }
-        displayFlashByEndpointId.clear()
-        displayFlashByEndpointId.putAll(prunedDisplayFlashes)
+        val displayEndpointIdsForRows = if (mode == SessionOperatingMode.DISPLAY_HOST) {
+            connectionsManager.connectedEndpoints().filterNot { endpointId ->
+                displayControllerEndpointIds.contains(endpointId) ||
+                    isControllerEndpointName(displayHostDeviceNamesByEndpointId[endpointId])
+            }.toSet()
+        } else {
+            connectionsManager.connectedEndpoints()
+        }
         val displayLapRows = buildDisplayLapRowsForConnectedDevices(
-            connectedEndpointIds = connectedEndpointIds,
+            connectedEndpointIds = displayEndpointIdsForRows,
             deviceNamesByEndpointId = displayHostDeviceNamesByEndpointId,
-            elapsedByEndpointId = buildDisplayElapsedByEndpointId(
-                connectedEndpointIds = connectedEndpointIds,
-                finalizedElapsedByEndpointId = displayLatestLapByEndpointId,
-                startedAtElapsedNanosByEndpointId = displayStartedAtElapsedNanosByEndpointId,
-                nowElapsedNanos = nowElapsedNanos,
-            ),
-            limitMsByEndpointId = displayLimitMsByEndpointId,
-            flashStatusByEndpointId = activeDisplayFlashes,
+            elapsedByEndpointId = displayLatestLapByEndpointId,
+            limitMillisByEndpointId = displayLimitMillisByEndpointId,
             hostStartSensorNanos = timelineForUi.hostStartSensorNanos,
             hostStopSensorNanos = timelineForUi.hostStopSensorNanos,
             monitoringActive = raceState.monitoringActive,
@@ -1070,7 +1147,9 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                 networkSummary = "${connectionsManager.currentRole().name.lowercase()} mode, ${liveConnectedEndpoints.size} connected",
                 displayLapRows = displayLapRows,
                 displayConnectedHostName = displayConnectedHostName,
+                displayConnectedHostEndpointId = displayConnectedHostEndpointId,
                 displayDiscoveryActive = displayDiscoveryActive,
+                controllerTargetEndpoints = controllerTargetDeviceNamesByEndpointId.toMap(),
             )
         }
     }
@@ -1108,14 +1187,20 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
 
     private fun localEndpointName(): String {
         val model = Build.MODEL?.trim().orEmpty()
-        if (model.isNotEmpty()) {
-            return model
+        val baseName = when {
+            model.isNotEmpty() -> model
+            Build.DEVICE?.trim().orEmpty().isNotEmpty() -> Build.DEVICE.trim()
+            else -> "Android Device"
         }
-        val device = Build.DEVICE?.trim().orEmpty()
-        if (device.isNotEmpty()) {
-            return device
+        return if (setupActionProfile == SetupActionProfile.CONTROLLER_ONLY) {
+            if (baseName.contains("controller", ignoreCase = true)) {
+                baseName
+            } else {
+                "$baseName (Controller)"
+            }
+        } else {
+            baseName
         }
-        return "Android Device"
     }
 
     private fun localDeviceId(): String {
@@ -1208,14 +1293,9 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
                         connectedEndpointIds.any { endpointId ->
                             displayLatestLapByEndpointId[endpointId] == null
                         }
-                    val hasRunningDisplayTimers = connectedEndpointIds.any { endpointId ->
-                        displayStartedAtElapsedNanosByEndpointId[endpointId] != null &&
-                            displayLatestLapByEndpointId[endpointId] == null
-                    }
                     val shouldRefreshForDisplayRows = isDisplayRole &&
-                        ((raceState.timeline.hostStartSensorNanos != null && hasPendingDisplayFinals) ||
-                            hasRunningDisplayTimers ||
-                            displayFlashByEndpointId.isNotEmpty())
+                        raceState.timeline.hostStartSensorNanos != null &&
+                        hasPendingDisplayFinals
                     if (!isAppResumed || (!raceState.monitoringActive && !shouldRefreshForDisplayRows)) {
                         break
                     }
@@ -1261,11 +1341,77 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
 
     private fun flushPendingLapResults() {
         val hostEndpoint = displayConnectedHostEndpointId ?: return
-        while (pendingStartTriggers.isNotEmpty()) {
-            val triggerMessage = pendingStartTriggers.removeFirst()
-            connectionsManager.sendMessage(hostEndpoint, triggerMessage.toJsonString()) { result ->
+
+        while (pendingLapResults.isNotEmpty()) {
+            val lapMessage = pendingLapResults.removeFirst()
+            connectionsManager.sendMessage(hostEndpoint, lapMessage.toJsonString()) { result ->
                 if (result.isFailure) {
-                    pendingStartTriggers.addFirst(triggerMessage)
+                    // Re-queue at front if send fails, will retry on next flush
+                    pendingLapResults.addFirst(lapMessage)
+                }
+            }
+        }
+    }
+
+    private fun sendControllerCommandToDisplayHost(
+        action: SessionControlAction,
+        targetEndpointId: String,
+        limitMillis: Long?,
+    ) {
+        val hostEndpoint = displayConnectedHostEndpointId
+        if (hostEndpoint.isNullOrBlank()) {
+            appendEvent("controller not connected to display host")
+            return
+        }
+        val payload = SessionControlCommandMessage(
+            action = action,
+            targetEndpointId = targetEndpointId,
+            senderDeviceName = localEndpointName(),
+            limitMillis = limitMillis,
+        ).toJsonString()
+        connectionsManager.sendMessage(hostEndpoint, payload) { result ->
+            result.exceptionOrNull()?.let { error ->
+                appendEvent("controller command error: ${error.localizedMessage ?: "unknown"}")
+            }
+        }
+    }
+
+    private fun broadcastControllerTargetsSnapshotToConnectedEndpoints() {
+        if (uiState.value.operatingMode != SessionOperatingMode.DISPLAY_HOST) {
+            return
+        }
+        val connectedEndpoints = connectionsManager.connectedEndpoints()
+        if (connectedEndpoints.isEmpty()) {
+            return
+        }
+        connectedEndpoints.forEach { endpointId ->
+            if (!displayControllerEndpointIds.contains(endpointId)) {
+                return@forEach
+            }
+            val targets = connectedEndpoints
+                .asSequence()
+                .filter { candidateEndpoint -> candidateEndpoint != endpointId }
+                .filter { candidateEndpoint -> !displayControllerEndpointIds.contains(candidateEndpoint) }
+                .filter { candidateEndpoint ->
+                    val candidateName = displayHostDeviceNamesByEndpointId[candidateEndpoint].orEmpty()
+                    !candidateName.contains("controller", ignoreCase = true)
+                }
+                .map { candidateEndpoint ->
+                    SessionControllerTarget(
+                        endpointId = candidateEndpoint,
+                        deviceName = displayHostDeviceNamesByEndpointId[candidateEndpoint]
+                            ?.takeIf { it.isNotBlank() }
+                            ?: candidateEndpoint,
+                    )
+                }
+                .toList()
+            val payload = SessionControllerTargetsMessage(
+                senderDeviceName = localEndpointName(),
+                targets = targets,
+            ).toJsonString()
+            connectionsManager.sendMessage(endpointId, payload) { result ->
+                result.exceptionOrNull()?.let { error ->
+                    appendEvent("target snapshot error: ${error.localizedMessage ?: "unknown"}")
                 }
             }
         }
@@ -1273,17 +1419,14 @@ class MainActivity : ComponentActivity(), ActivityCompat.OnRequestPermissionsRes
 
     private fun clearDisplayRelayReconnectionState() {
         displayReconnectionPending = false
-        pendingStartTriggers.clear()
-        lastRelayedStartSensorNanos = null
+        pendingLapResults.clear()
     }
 
     private fun clearDisplayHostLapState() {
+        displayControllerEndpointIds.clear()
         displayHostDeviceNamesByEndpointId.clear()
         displayLatestLapByEndpointId.clear()
-        displayStartedAtElapsedNanosByEndpointId.clear()
-        displayStartedAtSensorNanosByEndpointId.clear()
-        displayLimitMsByEndpointId.clear()
-        displayFlashByEndpointId.clear()
+        displayLimitMillisByEndpointId.clear()
     }
 
     private fun logRuntimeDiagnostic(message: String) {
@@ -1300,16 +1443,29 @@ internal enum class LocalCaptureAction {
 internal enum class AutoStartRole {
     NONE,
     DISPLAY,
+    CONTROLLER,
     SINGLE,
 }
 
 internal fun resolveAutoStartRole(configuredRole: String): AutoStartRole {
     return when (configuredRole.trim().lowercase()) {
         "display", "host" -> AutoStartRole.DISPLAY
+        "controller" -> AutoStartRole.CONTROLLER
         "single", "client" -> AutoStartRole.SINGLE
         else -> AutoStartRole.NONE
     }
 }
+
+internal fun resolveEffectiveAutoStartRole(configuredRole: String, flavorName: String): String {
+    if (isOneplusControllerFlavor(flavorName)) {
+        return "controller"
+    }
+    val normalizedRole = configuredRole.trim().lowercase()
+    return if (normalizedRole.isNotBlank()) normalizedRole else "none"
+}
+
+internal fun isOneplusControllerFlavor(flavorName: String): Boolean =
+    flavorName.trim().equals("oneplusSingle", ignoreCase = true)
 
 internal fun resolveTcpHostAddress(gatewayIp: String?, fallbackIp: String = "192.168.43.1"): String {
     val gateway = gatewayIp?.trim().orEmpty()
@@ -1400,12 +1556,17 @@ internal fun shouldRunLocalMonitoring(
     return userMonitoringEnabled && localRole != SessionDeviceRole.UNASSIGNED
 }
 
+internal fun controllerInitialStage(): SessionStage = SessionStage.MONITORING
+
+internal fun isControllerEndpointName(deviceName: String?): Boolean {
+    return deviceName?.contains("controller", ignoreCase = true) == true
+}
+
 internal fun buildDisplayLapRowsForConnectedDevices(
     connectedEndpointIds: Set<String>,
     deviceNamesByEndpointId: Map<String, String>,
     elapsedByEndpointId: Map<String, Long>,
-    limitMsByEndpointId: Map<String, Long> = emptyMap(),
-    flashStatusByEndpointId: Map<String, DisplayRowFlashStatus> = emptyMap(),
+    limitMillisByEndpointId: Map<String, Long>,
     hostStartSensorNanos: Long?,
     hostStopSensorNanos: Long?,
     monitoringActive: Boolean,
@@ -1420,92 +1581,26 @@ internal fun buildDisplayLapRowsForConnectedDevices(
     }
     return connectedEndpointIds.map { endpointId ->
         val deviceName = deviceNamesByEndpointId[endpointId]?.takeIf { it.isNotBlank() } ?: endpointId
-        val limitMs = limitMsByEndpointId[endpointId]
-        val lapTimeLabel = (elapsedByEndpointId[endpointId] ?: liveElapsedNanos)?.let { elapsedNanos ->
-            val totalMillis = (elapsedNanos / 1_000_000L).coerceAtLeast(0L)
+        val elapsedNanos = elapsedByEndpointId[endpointId] ?: liveElapsedNanos
+        val lapTimeLabel = elapsedNanos?.let { elapsed ->
+            val totalMillis = (elapsed / 1_000_000L).coerceAtLeast(0L)
             formatElapsedTimerDisplay(totalMillis)
         } ?: "READY"
+        val limitMillis = limitMillisByEndpointId[endpointId]
+        val limitNanos = limitMillis?.times(1_000_000L)
+        val isOverLimit = limitNanos != null && elapsedNanos != null && elapsedNanos > limitNanos
+        val isUnderLimit = limitNanos != null && elapsedNanos != null && elapsedNanos <= limitNanos
         DisplayLapRow(
-            endpointId = endpointId,
             deviceName = deviceName,
-            limitMs = limitMs,
-            limitLabel = limitMs?.let(::formatDisplayLimitLabel),
             lapTimeLabel = lapTimeLabel,
-            flashStatus = flashStatusByEndpointId[endpointId] ?: DisplayRowFlashStatus.NONE,
+            limitLabel = limitMillis?.let(::formatDisplayLimitLabel),
+            isOverLimit = isOverLimit,
+            isUnderLimit = isUnderLimit,
         )
     }
 }
 
-internal data class DisplayFlashWindow(
-    val status: DisplayRowFlashStatus,
-    val expiresAtElapsedNanos: Long,
-)
-
-internal fun displayFlashStatusForElapsed(limitMs: Long?, elapsedNanos: Long): DisplayRowFlashStatus {
-    val limit = limitMs ?: return DisplayRowFlashStatus.NONE
-    val elapsedMs = (elapsedNanos / 1_000_000L).coerceAtLeast(0L)
-    return if (elapsedMs <= limit) {
-        DisplayRowFlashStatus.PASS
-    } else {
-        DisplayRowFlashStatus.FAIL
-    }
-}
-
-internal fun formatDisplayLimitLabel(limitMs: Long): String {
-    val clamped = limitMs.coerceAtLeast(0L)
-    val totalSeconds = clamped / 1_000L
-    val centiseconds = (clamped % 1_000L) / 10L
-    return if (totalSeconds < 60L) {
-        String.format("%d.%02d", totalSeconds, centiseconds)
-    } else {
-        val minutes = totalSeconds / 60L
-        val seconds = totalSeconds % 60L
-        String.format("%d:%02d.%02d", minutes, seconds, centiseconds)
-    }
-}
-
-internal fun pruneDisplayFlashWindowsByEndpointId(
-    connectedEndpointIds: Set<String>,
-    flashWindowsByEndpointId: Map<String, DisplayFlashWindow>,
-    nowElapsedNanos: Long,
-): Map<String, DisplayFlashWindow> {
-    return flashWindowsByEndpointId
-        .filter { (endpointId, flashWindow) ->
-            connectedEndpointIds.contains(endpointId) &&
-                flashWindow.expiresAtElapsedNanos > nowElapsedNanos
-        }
-}
-
-internal fun activeDisplayFlashStatusesByEndpointId(
-    connectedEndpointIds: Set<String>,
-    flashWindowsByEndpointId: Map<String, DisplayFlashWindow>,
-    nowElapsedNanos: Long,
-): Map<String, DisplayRowFlashStatus> {
-    return pruneDisplayFlashWindowsByEndpointId(
-        connectedEndpointIds = connectedEndpointIds,
-        flashWindowsByEndpointId = flashWindowsByEndpointId,
-        nowElapsedNanos = nowElapsedNanos,
-    ).mapValues { (_, flashWindow) -> flashWindow.status }
-}
-
-internal fun buildDisplayElapsedByEndpointId(
-    connectedEndpointIds: Set<String>,
-    finalizedElapsedByEndpointId: Map<String, Long>,
-    startedAtElapsedNanosByEndpointId: Map<String, Long>,
-    nowElapsedNanos: Long,
-): Map<String, Long> {
-    val elapsedByEndpointId = linkedMapOf<String, Long>()
-    connectedEndpointIds.forEach { endpointId ->
-        val finalized = finalizedElapsedByEndpointId[endpointId]
-        if (finalized != null) {
-            elapsedByEndpointId[endpointId] = finalized
-            return@forEach
-        }
-        val startedAt = startedAtElapsedNanosByEndpointId[endpointId] ?: return@forEach
-        elapsedByEndpointId[endpointId] = (nowElapsedNanos - startedAt).coerceAtLeast(0L)
-    }
-    return elapsedByEndpointId
-}
+internal fun formatDisplayLimitLabel(limitMillis: Long): String = "Limit ${limitMillis} ms"
 
 internal fun formatElapsedTimerDisplay(totalMillis: Long): String {
     val clamped = totalMillis.coerceAtLeast(0L)

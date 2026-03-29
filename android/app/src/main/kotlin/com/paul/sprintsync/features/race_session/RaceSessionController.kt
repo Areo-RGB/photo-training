@@ -1383,12 +1383,13 @@ class RaceSessionController(
         var nextDevices = devices
         val local = nextDevices.firstOrNull { it.isLocal } ?: return devices
         val remotes = nextDevices.filterNot { it.isLocal }
+        val participantRemotes = remotes.filterNot { isControllerDevice(it) }
         if (remotes.isEmpty()) {
             return devices
         }
 
         if (nextDevices.none { it.role == SessionDeviceRole.START }) {
-            val preferredStartId = remotes.firstOrNull { it.role == SessionDeviceRole.UNASSIGNED }?.id
+            val preferredStartId = participantRemotes.firstOrNull { it.role == SessionDeviceRole.UNASSIGNED }?.id
                 ?: if (local.role == SessionDeviceRole.UNASSIGNED) local.id else null
             if (preferredStartId != null) {
                 nextDevices = nextDevices.map { existing ->
@@ -1404,6 +1405,7 @@ class RaceSessionController(
         if (nextDevices.none { it.role == SessionDeviceRole.STOP }) {
             val preferredStopId = nextDevices
                 .filterNot { it.isLocal }
+                .filterNot { isControllerDevice(it) }
                 .firstOrNull { it.role == SessionDeviceRole.UNASSIGNED }
                 ?.id
                 ?: if (nextDevices.any { it.id == local.id && it.role == SessionDeviceRole.UNASSIGNED }) local.id else null
@@ -1419,7 +1421,7 @@ class RaceSessionController(
         }
 
         nextDevices = nextDevices.map { existing ->
-            if (!existing.isLocal && existing.role == SessionDeviceRole.UNASSIGNED) {
+            if (!existing.isLocal && !isControllerDevice(existing) && existing.role == SessionDeviceRole.UNASSIGNED) {
                 existing.copy(role = SessionDeviceRole.SPLIT)
             } else {
                 existing
@@ -1456,5 +1458,9 @@ class RaceSessionController(
 
     private fun localDeviceName(): String {
         return localDeviceFromState().name
+    }
+
+    private fun isControllerDevice(device: SessionDevice): Boolean {
+        return device.name.contains("controller", ignoreCase = true)
     }
 }

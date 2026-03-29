@@ -57,7 +57,7 @@ android {
             dimension = "deviceProfile"
             applicationIdSuffix = ".oneplus.single"
             versionNameSuffix = "-oneplus-single"
-            buildConfigField("String", "AUTO_START_ROLE", "\"single\"")
+            buildConfigField("String", "AUTO_START_ROLE", "\"controller\"")
             buildConfigField("int", "TCP_HOST_PORT", "9000")
             buildConfigField("String", "FALLBACK_HOST_IP", "\"192.168.43.1\"")
             resValue("string", "app_name", "Sprint Sync OnePlus")
